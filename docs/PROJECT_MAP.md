@@ -20,6 +20,7 @@
 | Конфигурация nginx (BTLS наружу, HTTP внутрь) | проверено вживую | `nginx.conf.template`, allowlist путей — единственная граница |
 | Работа с сертификатами ГосСУОК | сделано | `ca/`, два стартовых гейта; следить за сроком — [#4](https://github.com/bx-shef/bee2-tls-gateway/issues/4) |
 | Тесты | сделано | `scripts/check-config.sh` (намерение) + смоук в job `image` (поведение) + `scripts/check-config-mutations.sh` (сами проверки живы) |
+| Лицензии и атрибуция | сделано | `NOTICE`, тексты апстримов в образе, гейт 4; план Б — `PROCESS.md` §5 ([#6](https://github.com/bx-shef/bee2-tls-gateway/issues/6)) |
 | Развёртывание | отложено | образ публикуется в GHCR; включение у потребителя — по тегу, не `latest` |
 
 ## Блокеры

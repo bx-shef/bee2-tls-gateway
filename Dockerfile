@@ -86,6 +86,19 @@ RUN set -eu; \
     /opt/btls/bin/openssl ciphers -v 'ALL:eNULL' | grep -q 'DHT-BIGN-WITH-BELT-CTR-MAC-HBELT'; \
     echo 'BTLS suites present'
 
+# Тексты лицензий берём ИЗ ТОГО ЖЕ дерева, которое только что собрали, а не переписываем
+# в репозиторий руками: переписанная копия расходится с апстримом молча и ровно тогда,
+# когда её придёт читать аудитор. `set -eu` + явный cp делают это гейтом — переедет
+# апстрим свой LICENSE.txt, и сборка встанет здесь, а не отдаст образ без атрибуции.
+# Пути заданы bee2evp: scripts/source.sh кладёт bee2 в ./bee2, а openssl клонирует в
+# ./openssl рядом с ними.
+RUN set -eu; \
+    mkdir -p /licenses; \
+    cp /src/bee2evp/LICENSE.txt         /licenses/bee2evp-LICENSE.txt; \
+    cp /src/bee2evp/bee2/LICENSE.txt    /licenses/bee2-LICENSE.txt; \
+    cp /src/bee2evp/openssl/LICENSE.txt /licenses/openssl-LICENSE.txt; \
+    echo 'licenses collected: bee2evp, bee2, openssl'
+
 # =================================================================================
 # Stage 2 — nginx linked against THAT OpenSSL
 # =================================================================================
@@ -155,6 +168,12 @@ RUN set -eu; \
     ldd /opt/nginx/sbin/nginx | grep -E 'libssl|libcrypto' | grep -q '/opt/btls/lib'; \
     echo "nginx linked against the patched OpenSSL ${expected}"
 
+# Та же логика, что и для криптостека: лицензия nginx едет из распакованного архива,
+# который сейчас собирали. /licenses уже существует — стадия наследует его от `btls`.
+RUN set -eu; \
+    cp "/src/nginx-${NGINX_VERSION}/LICENSE" /licenses/nginx-LICENSE; \
+    echo 'licenses collected: nginx'
+
 # =================================================================================
 # Stage 3 — runtime. No compiler, no git, no source.
 # =================================================================================
@@ -191,6 +210,26 @@ COPY ca/ /etc/crypto-gw/ca/
 COPY nginx.conf.template /etc/crypto-gw/nginx.conf.template
 COPY entrypoint.sh healthcheck.sh /usr/local/bin/
 RUN chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/healthcheck.sh
+
+# Атрибуция едет ВНУТРИ образа, а не только в репозитории. Apache-2.0 §4 обязывает
+# отдать получателю копию лицензии и сохранённые уведомления — а получает он образ,
+# в репозиторий он может не заглянуть никогда. bee2evp, bee2 и OpenSSL под Apache-2.0,
+# nginx под BSD-2-Clause; что именно и откуда — в NOTICE. См. #6.
+COPY --from=nginx-build /licenses/ /usr/share/licenses/
+COPY LICENSE NOTICE /usr/share/licenses/
+
+# Гейт 4 — атрибуция на месте. Без него образ собирается и публикуется без единого
+# текста лицензии, и обнаруживается это на аудите, а не в CI. Проверяем и наличие, и
+# непустоту: `COPY` несуществующего каталога упал бы сам, а вот пустой файл проехал бы.
+RUN set -eu; \
+    for f in bee2evp-LICENSE.txt bee2-LICENSE.txt openssl-LICENSE.txt nginx-LICENSE \
+             LICENSE NOTICE; do \
+      test -s "/usr/share/licenses/$f" || { echo "нет или пуст: $f" >&2; exit 1; }; \
+    done; \
+    grep -q 'Apache License' /usr/share/licenses/bee2evp-LICENSE.txt; \
+    grep -q 'Apache License' /usr/share/licenses/bee2-LICENSE.txt; \
+    grep -q 'Apache License' /usr/share/licenses/openssl-LICENSE.txt; \
+    echo 'атрибуция на месте: 4 лицензии апстримов + LICENSE + NOTICE'
 
 # Gate 3 — SEMANTIC chain check, and the reason this line exists at all: a bundle that
 # holds only the root passes `openssl x509 -subject` and passes `nginx -t`, and then
