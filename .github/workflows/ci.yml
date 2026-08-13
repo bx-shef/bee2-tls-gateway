@@ -125,7 +125,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       # Сборка доказывает, что криптостек компилируется, цепочка сертификатов проверяется
       # и атрибуция лицензий доехала — четыре гейта живут внутри Dockerfile. Она НЕ
