@@ -39,8 +39,16 @@ ARG BEE2EVP_COMMIT=2ae3c71e8b24b6904367850e5963933236a1539f
 # `proxy_ssl_verify on` + `proxy_ssl_name` make this image do on every request to the bank.
 # Verified locally with this pin: engine available, 8 BTLS suites, GosSUOK chain verifies.
 ARG OPENSSL_TAG=openssl-3.5.6
-ARG NGINX_VERSION=1.28.0
-ARG NGINX_SHA256=c6b5c6b086c0df9d3ca3ff5e084c1d0ef909e6038279c71c1c3e985f576ff76a
+# ⚠ 1.28.0 нёс CVE-2026-1642 (SSL upstream injection): при проксировании на TLS-апстрим
+# атакующий с MITM-позиции на стороне апстрима мог внедрить открытый текст в ответ. Это
+# ровно то, чем занят этот образ, — поэтому 1.28.3, где исправление уже есть (1.28.2+).
+# ⚠ 1.28 — ВЕТКА LEGACY (stable сейчас 1.30.x, mainline 1.31.x). Часть новых находок в неё
+# не попадёт в принципе, и уход на stable — отдельное решение, а не следствие этого пина: #15.
+ARG NGINX_VERSION=1.28.3
+# sha256 снят с архива, скачанного с nginx.org, и проверен двумя способами: тем же приёмом
+# заново посчитан хеш 1.28.0 и совпал с прежним пином, а сам архив несёт годную подпись
+# сопровождающего (ключ nginx.org/keys/arut.key).
+ARG NGINX_SHA256=2c96a946bfb0882a21744ed429770a2123ae1828c7c48665092993ddee91a918
 
 # =================================================================================
 # Stage 1 — BTLS: OpenSSL patched with the STB 34.101.65 ciphersuites + bee2evp engine
