@@ -75,6 +75,15 @@ jobs:
           sys.exit(1 if failed else 0)
           PY
 
+      - name: Конфигурация шлюза (плейсхолдеры, лог, TLS, allowlist)
+        run: bash scripts/check-config.sh
+
+      # Сторож сторожа: ломает конфиг нарочно и требует, чтобы шаг выше покраснел — иначе
+      # проверка, которая никогда не краснеет, неотличима в CI от работающей. Так была
+      # найдена мёртвая проверка про переменные nginx (см. шапку скрипта).
+      - name: Мутационная проверка (сами проверки живы?)
+        run: bash scripts/check-config-mutations.sh
+
       - name: Штамп Last reviewed в документации
         run: |
           status=0
@@ -88,3 +97,55 @@ jobs:
             fi
           done < <(git ls-files '*.md')
           exit "$status"
+
+  image:
+    name: image
+    runs-on: ubuntu-latest
+    # Сборка криптостека из исходников идёт долго; отдельный job, чтобы быстрые проверки
+    # отдавали результат, не дожидаясь её.
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Сборка доказывает, что криптостек компилируется и цепочка сертификатов проверяется —
+      # три гейта живут внутри Dockerfile. Она НЕ доказывает, что контейнер стартует: между
+      # ними лежит entrypoint.sh (рендер envsubst, `nginx -t`, гейты корней, переход на
+      # непривилегированного пользователя, healthcheck на bash /dev/tcp). Без смоука всё это
+      # впервые исполнилось бы на сервере во время выката.
+      - name: Сборка образа
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: bee2-tls-gateway:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Банк не участвует: GW_UPSTREAM_HOST — IP-литерал (значит nginx не нужен DNS и
+      # `nginx -t` не может упасть на резолве), а /healthz апстрима не касается.
+      - name: Смоук — контейнер стартует и отвечает
+        run: |
+          set -euo pipefail
+          docker run -d --name gw-smoke -p 127.0.0.1:1080:1080 \
+            -e GW_UPSTREAM_HOST=127.0.0.1 -e GW_UPSTREAM_PORT=9345 \
+            bee2-tls-gateway:ci
+          for _ in $(seq 1 20); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' gw-smoke)" = healthy ] && break
+            sleep 2
+          done
+          docker logs gw-smoke
+          test "$(docker inspect -f '{{.State.Health.Status}}' gw-smoke)" = healthy
+          # Список путей — единственная граница безопасности шлюза. Утверждаем его СНАРУЖИ,
+          # а не чтением конфига: check-config.sh проверяет намерение, смоук — поведение.
+          code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+          test "$(code http://127.0.0.1:1080/healthz)" = 200
+          test "$(code http://127.0.0.1:1080/)" = 404
+          test "$(code http://127.0.0.1:1080/open-banking-authorize/v1.0/oauth2/token)" = 403
+          test "$(code -X DELETE http://127.0.0.1:1080/open-banking/v1.0/accounts)" = 403
+          # Работает непривилегированным.
+          test "$(docker exec gw-smoke id -u)" = 10001
+          docker rm -f gw-smoke
