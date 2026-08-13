@@ -29,6 +29,12 @@ import sys
 
 TPL = "nginx.conf.template"
 EP = "entrypoint.sh"
+DF = "Dockerfile"
+CR = "scripts/check-crypto.sh"
+
+# Всё, что мутируем, обязано откатываться. Забыть файл здесь — значит оставить мутацию
+# в рабочем дереве и увести следующего в разбор несуществующей поломки.
+MUTATED = (TPL, EP, DF, CR)
 
 
 def git(*args):
@@ -36,14 +42,18 @@ def git(*args):
 
 
 def restore():
-    git("checkout", "--", TPL, EP)
+    git("checkout", "--", *MUTATED)
 
 
 def sub(path, pattern, repl):
-    """Заменить первое совпадение; False, если паттерн не совпал."""
+    """Заменить первое совпадение; False, если паттерн не совпал.
+
+    re.M — чтобы `^`/`$` означали границы СТРОКИ: пины задаются построчно (`ARG NAME=...`),
+    и без этого флага такой паттерн молча не совпадёт, а мутация превратится в пропуск.
+    """
     with open(path, encoding="utf-8") as fh:
         text = fh.read()
-    new, count = re.subn(pattern, repl, text, count=1)
+    new, count = re.subn(pattern, repl, text, count=1, flags=re.M)
     if count == 0:
         return False
     with open(path, "w", encoding="utf-8") as fh:
@@ -51,22 +61,26 @@ def sub(path, pattern, repl):
     return True
 
 
-def run_checks():
-    p = subprocess.run(["bash", "scripts/check-config.sh"], capture_output=True, text=True)
+def run_checks(script="scripts/check-config.sh"):
+    p = subprocess.run(["bash", script], capture_output=True, text=True)
     return p.returncode, p.stdout + p.stderr
 
 
 results = []
 
 
-def mutate(name, apply_fn, want):
-    """want — фрагмент имени проверки, которая ОБЯЗАНА покраснеть на этой мутации."""
+def mutate(name, apply_fn, want, script="scripts/check-config.sh"):
+    """want — фрагмент имени проверки, которая ОБЯЗАНА покраснеть на этой мутации.
+
+    script — какой сторож обязан её поймать. Мутация, пойманная ЧУЖИМ сторожем, здесь
+    считается провалом: значит свой мёртв, а его работу делает соседний по случайности.
+    """
     restore()
     if not apply_fn():
         results.append(("СЛОМ", name, "мутация не применилась: паттерн не совпал с файлом"))
         restore()
         return
-    rc, out = run_checks()
+    rc, out = run_checks(script)
     fails = [ln for ln in out.splitlines() if ln.startswith("FAIL")]
     if rc == 0:
         results.append(("СЛОМ", name, "ЗЕЛЁНЫЙ — проверка не ловит эту поломку"))
@@ -77,13 +91,14 @@ def mutate(name, apply_fn, want):
     restore()
 
 
-if git("status", "--porcelain", "--", TPL, EP).stdout.strip():
-    sys.exit(f"FAIL {TPL}/{EP} изменены — мутации откатываются через git, прерываю")
+if git("status", "--porcelain", "--", *MUTATED).stdout.strip():
+    sys.exit(f"FAIL мутируемые файлы изменены — откат идёт через git, прерываю")
 
-rc, out = run_checks()
-if rc != 0:
-    sys.exit(f"FAIL базовая линия КРАСНАЯ — чинить конфиг, а не мутации:\n{out}")
-results.append(("ok", "базовая линия без мутаций", "зелёная"))
+for script in ("scripts/check-config.sh", "scripts/check-pins.sh"):
+    rc, out = run_checks(script)
+    if rc != 0:
+        sys.exit(f"FAIL базовая линия КРАСНАЯ у {script} — чинить его, а не мутации:\n{out}")
+results.append(("ok", "базовая линия без мутаций", "зелёная у обоих сторожей"))
 
 # --- envsubst: список переменных против плейсхолдеров шаблона ---------------------
 mutate("плейсхолдер шаблона отсутствует в списке envsubst",
@@ -152,6 +167,34 @@ mutate("отказ по умолчанию заменён на 200",
                    "location / {\n            return 200;"),
        "всё остальное отвергается")
 
+# --- пины: согласованность между файлами (сторож — scripts/check-pins.sh) ----------
+PINS = "scripts/check-pins.sh"
+
+mutate("check-crypto.sh проверяет ДРУГОЙ коммит bee2evp, чем собирает Dockerfile",
+       lambda: sub(CR, r"^BEE2EVP_COMMIT=\S+$",
+                   "BEE2EVP_COMMIT=0000000000000000000000000000000000000000"),
+       "тот же bee2evp", PINS)
+
+mutate("базовый образ запинен по тегу вместо digest",
+       lambda: sub(DF, r"^ARG DEBIAN_IMAGE=\S+$", "ARG DEBIAN_IMAGE=debian:12-slim"),
+       "по digest", PINS)
+
+mutate("bee2evp запинен коротким sha",
+       lambda: sub(DF, r"^ARG BEE2EVP_COMMIT=\S+$", "ARG BEE2EVP_COMMIT=2ae3c71e"),
+       "полным sha коммита", PINS)
+
+mutate("OPENSSL_TAG не похож на тег релиза",
+       lambda: sub(DF, r"^ARG OPENSSL_TAG=\S+$", "ARG OPENSSL_TAG=master"),
+       "тегом релиза", PINS)
+
+mutate("NGINX_SHA256 обрезан",
+       lambda: sub(DF, r"^ARG NGINX_SHA256=\S+$", "ARG NGINX_SHA256=4261dc90"),
+       "64 hex-символа", PINS)
+
+mutate("BEE2_COMMIT в check-crypto.sh перестал быть sha",
+       lambda: sub(CR, r"^BEE2_COMMIT=\S+$", "BEE2_COMMIT=master"),
+       "похож на полный sha", PINS)
+
 restore()
 
 width = max(len(name) for _, name, _ in results)
@@ -159,7 +202,7 @@ for status, name, detail in results:
     print(f"{status:4} {name:<{width}}  {detail}")
 
 broken = [r for r in results if r[0] != "ok"]
-dirty = git("status", "--porcelain", "--", TPL, EP).stdout.strip()
+dirty = git("status", "--porcelain", "--", *MUTATED).stdout.strip()
 if dirty:
     print(f"\nFAIL мутации не откатились: {dirty}", file=sys.stderr)
 if broken:
