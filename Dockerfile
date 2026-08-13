@@ -88,8 +88,28 @@ RUN git clone https://github.com/bcrypto/bee2evp bee2evp \
 RUN sed -i 's/"\$build_type" -eq "Debug"/"$build_type" == "Debug"/' /src/bee2evp/scripts/source.sh \
  && grep -q '"\$build_type" == "Debug"' /src/bee2evp/scripts/source.sh
 
+# ⚠ ЧУЖОЙ ПАТЧ, принятый до мержа в апстриме — не наша правка криптоядра.
+# agievich/bee2 PR #77 чинит их же issue #76: rngJitterIsAvail() (проверка доступности
+# источника энтропии `jitter`) сама поднимает поток-счётчик, а закрывается он только
+# через utilOnExit — при выходе процесса. rngCreate() опрашивает все источники
+# безусловно, поэтому ЛЮБОЙ процесс с bee2 жёг одно ядро всю свою жизнь (#8).
+# Замерено: user 5,089 с без патча против 0,064 с с патчем на процессе, который только
+# спит пять секунд; st alg и st rng после патча проходят.
+# ⚠ Патч висит в апстриме без ревью с 18.06.2026. Смержат — удалить отсюда и сдвинуть
+# BEE2EVP_COMMIT на версию с исправлением; своего форка bee2 не заводим.
+# Подмодуль инициализируем САМИ до сборки: build.sh делает `git submodule update --init`
+# без --force, и на уже выставленном коммите это но-оп, поэтому патч доживает до compile.
+COPY patches/bee2-pr77-jitter-thread.patch /src/patches/
+RUN cd /src/bee2evp && git submodule update --init \
+ && git -C bee2 apply /src/patches/bee2-pr77-jitter-thread.patch \
+ && grep -q '_tm_ctr_close_registered' bee2/src/core/rng/rng_timer.c
+
 ENV BEE2EVP_INSTALL_DIR=/opt/btls
-RUN cd /src/bee2evp && bash scripts/build.sh -s -b "${OPENSSL_TAG}"
+# Вторая проверка того же маркера — уже ПОСЛЕ сборки: она доказывает, что build.sh не
+# откатил подмодуль и компилировался пропатченный исходник. Без неё патч мог бы тихо
+# исчезнуть, а образ собрался бы зелёным с прежним busy-loop.
+RUN cd /src/bee2evp && bash scripts/build.sh -s -b "${OPENSSL_TAG}" \
+ && grep -q '_tm_ctr_close_registered' bee2/src/core/rng/rng_timer.c
 
 # Gate 1 — the stack is actually a BTLS stack. Without this the image builds fine and
 # fails at the first bank request, which is the most expensive place to find out.

@@ -25,6 +25,8 @@
 | Работа с сертификатами ГосСУОК | сделано | `ca/`, два стартовых гейта + предупреждение о сроках за 90 дн. и еженедельная проверка; процедура замены — `PROCESS.md` §4 ([#4](https://github.com/bx-shef/bee2-tls-gateway/issues/4)) |
 | Тесты | сделано | `scripts/check-config.sh` (намерение) + смоук в job `image` (поведение) + `scripts/check-pins.sh` (пины согласованы) + `scripts/check-allowlist.sh` (что нельзя выразить через GW_ALLOW) + `scripts/check-config-mutations.sh` (сами проверки живы) |
 | Лицензии и атрибуция | сделано | `NOTICE`, тексты апстримов в образе, гейт 4; план Б — `PROCESS.md` §5 ([#6](https://github.com/bx-shef/bee2-tls-gateway/issues/6)) |
+| Чужой патч bee2 (PR #77, busy-loop `jitter`) | принят, вживую не проверен | `patches/`, два гейта в `Dockerfile`; удалить после мержа в апстриме ([#8](https://github.com/bx-shef/bee2-tls-gateway/issues/8)) |
+| Полугодовой разбор зависимостей | сделано | `deps-review.yml` заводит issue с чеклистом 1 февраля и 1 августа |
 | Развёртывание | сделано, вживую не проверено | публикация в GHCR при мерже в `main` после смоука; прод пинится по `@sha256:`, `v1` — подвижный алиас ([#14](https://github.com/bx-shef/bee2-tls-gateway/issues/14)) |
 
 ## Блокеры

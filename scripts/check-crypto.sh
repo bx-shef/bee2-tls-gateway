@@ -63,6 +63,8 @@ head2() { printf '\n== %s\n' "$1"; }
 # стандартов (st alg) и показывает здоровье источников энтропии (es print).
 # В образе шлюза её нет: там только libbee2evp.so, движок для OpenSSL.
 BEE2_DIR="${BEE2_DIR:-.bee2}"
+# Путь абсолютный: git apply запускается с -C внутри клона, относительный туда не доедет.
+PATCH_PR77="$(cd "$(dirname "$0")/.." && pwd)/patches/bee2-pr77-jitter-thread.patch"
 find_bee2cmd() {
   if [ -n "${BEE2CMD:-}" ] && [ -x "${BEE2CMD}" ]; then
     echo "${BEE2CMD}"; return 0
@@ -89,9 +91,15 @@ build_bee2cmd() {
     bad "сборка: bee2 не на ожидаемом коммите"
     return 1
   fi
+  # Тот же чужой патч, что накладывает Dockerfile (agievich/bee2 PR #77). Без него
+  # локальная сборка отличалась бы от образа, и прогон перестал бы говорить об образе.
+  if ! git -C "${BEE2_DIR}" apply "${PATCH_PR77}"; then
+    bad "сборка: патч PR #77 не лёг на ${BEE2_COMMIT:0:8}"
+    return 1
+  fi
   cmake -S "${BEE2_DIR}" -B "${BEE2_DIR}/build" -DCMAKE_BUILD_TYPE=Release > /dev/null
   cmake --build "${BEE2_DIR}/build" --parallel > /dev/null
-  ok "bee2cmd собран из ${BEE2_COMMIT:0:8}"
+  ok "bee2cmd собран из ${BEE2_COMMIT:0:8} с патчем PR #77"
 }
 
 [ "$BUILD" = 1 ] && build_bee2cmd
