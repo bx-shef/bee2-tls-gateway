@@ -122,6 +122,33 @@ RUN set -eu; \
     /opt/btls/bin/openssl ciphers -v 'ALL:eNULL' | grep -q 'DHT-BIGN-WITH-BELT-CTR-MAC-HBELT'; \
     echo 'BTLS suites present'
 
+# bee2cmd — эталонная утилита самого bee2: `st alg` гоняет контрольные примеры стандартов
+# (СТБ 34.101.31/.45/.47/.77), `st rng` — самотест ДСЧ, `es print` — здоровье источников
+# энтропии. Она едет в рантайм-образ и там становится САМОТЕСТОМ ПРИ СТАРТЕ (#18), а не
+# просто инструментом: см. README § «Самотестирование криптостека», где эта возможность
+# описана как документированная — именно этого требует СТБ 34.101.27, и именно это
+# снимает возражение «лишний бинарь увеличивает объект испытаний» (#19).
+#
+# ⚠ ОТДЕЛЬНО ЕГО СОБИРАТЬ НЕ НАДО, и это стоило одной попытки. `scripts/build.sh -b` выше
+# уже собирает bee2 из подмодуля и ставит `bee2cmd` в `${BEE2EVP_INSTALL_DIR}/bin`
+# (`bee2/CMakeLists.txt`: `option(BUILD_CMD ... ON)`, `cmd/CMakeLists.txt`:
+# `install(TARGETS bee2cmd ...)`). Свой `cmake` здесь был ПОЛНОЙ ВТОРОЙ пересборкой bee2
+# вместе с `testbee2` — минуты на каждой сборке стадии ради файла, который уже лежал по
+# этому же пути. Нашли сборкой вживую, а не чтением.
+#
+# `test -x` оставлен намеренно: он ловит тот единственный риск, ради которого была затеяна
+# своя сборка, — что апстрим однажды выключит `BUILD_CMD`. Тогда сборка встанет ЗДЕСЬ, с
+# внятной строкой, а не в рантайм-стадии на непонятном `COPY: not found`.
+#
+# Самотест прогоняется прямо здесь и падает сборкой: криптостек, который не сходится с
+# контрольными примерами стандарта, не должен доехать до рантайма ни при каких условиях.
+RUN set -eu; \
+    test -x /opt/btls/bin/bee2cmd \
+      || { echo 'bee2cmd не собран build.sh — апстрим выключил BUILD_CMD?' >&2; exit 1; }; \
+    /opt/btls/bin/bee2cmd st alg; \
+    /opt/btls/bin/bee2cmd st rng; \
+    echo 'bee2cmd present from build.sh; st alg and st rng passed'
+
 # Тексты лицензий берём ИЗ ТОГО ЖЕ дерева, которое только что собрали, а не переписываем
 # в репозиторий руками: переписанная копия расходится с апстримом молча и ровно тогда,
 # когда её придёт читать аудитор. `set -eu` + явный cp делают это гейтом — переедет
@@ -134,6 +161,24 @@ RUN set -eu; \
     cp /src/bee2evp/bee2/LICENSE.txt    /licenses/bee2-LICENSE.txt; \
     cp /src/bee2evp/openssl/LICENSE.txt /licenses/openssl-LICENSE.txt; \
     echo 'licenses collected: bee2evp, bee2, openssl'
+
+# ⚠ whereami — ТРЕТЬЯ СТОРОНА ВНУТРИ bee2, и до #19 её здесь не было по честной причине:
+# она компилируется только в `bee2cmd`, а `bee2cmd` в образ не ехал. Теперь едет (самотест
+# при старте), значит едет и этот код — и его атрибуция стала обязательной.
+# ⚠ Отдельного файла лицензии у него нет: она живёт заголовком в самом исходнике. Поэтому
+# вырезаем заголовок ИЗ СОБРАННОГО ДЕРЕВА, а не переписываем руками — то же правило, что и
+# выше: переписанная копия расходится с апстримом молча.
+RUN set -eu; \
+    { echo 'whereami — third-party code inside bee2 (bee2/cmd/core/whereami.c),'; \
+      echo 'compiled into the bee2cmd binary that this image ships.'; \
+      echo 'Verbatim licence header from the source tree this image was built from:'; \
+      echo; \
+      sed -n '1,4p' /src/bee2evp/bee2/cmd/core/whereami.c; \
+    } > /licenses/whereami-LICENSE.txt; \
+    grep -q 'WTFPL' /licenses/whereami-LICENSE.txt; \
+    grep -q 'MIT' /licenses/whereami-LICENSE.txt; \
+    grep -q 'Gregory Pakosz' /licenses/whereami-LICENSE.txt; \
+    echo 'licenses collected: whereami (shipped inside bee2cmd)'
 
 # =================================================================================
 # Stage 2 — nginx linked against THAT OpenSSL
@@ -226,6 +271,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=btls /opt/btls/lib/libcrypto.so.3 /opt/btls/lib/libssl.so.3 /opt/btls/lib/libbee2evp.so /opt/btls/lib/
 COPY --from=btls /opt/btls/bin/openssl /opt/btls/bin/openssl
+# ⚠ ДОКУМЕНТИРОВАННАЯ ВОЗМОЖНОСТЬ, а не инструмент, забытый в образе. bee2cmd здесь ради
+# самотеста при старте (entrypoint.sh §0) — требование СТБ 34.101.27 к изделию, и так же
+# сделано в сертифицированном AvTunProxy, который печатает `self-test result: OK` в первых
+# строках лога. Описана в README § «Самотестирование криптостека»; решение положить её
+# именно в рантайм — docs/PROCESS.md §5 и docs/CERTIFICATION.md §6.
+COPY --from=btls /opt/btls/bin/bee2cmd /opt/btls/bin/bee2cmd
 COPY --from=btls /opt/btls/openssl.cnf /opt/btls/openssl.cnf
 COPY --from=nginx-build /opt/nginx /opt/nginx
 
@@ -267,6 +318,16 @@ RUN set -eu; \
       /etc/crypto-gw/ca/bank-leaf-reference.pem \
     && echo 'BTLS suites present and GosSUOK bundle verifies the reference bank certificate'
 
+# Gate 5 — bee2cmd РАБОТАЕТ в рантайме, а не только в сборочной стадии. Та же логика, что
+# у гейта 3 выше: собранное дерево и отобранный набор файлов — разные вещи. Бинарь мог
+# слинковаться с библиотекой, которая осталась в стадии `btls`, и тогда самотест при
+# старте падал бы у каждого, кто запустил образ, — то есть проба, введённая ради
+# надёжности, стала бы причиной отказа. Ловим здесь, при сборке.
+RUN set -eu; \
+    /opt/btls/bin/bee2cmd st alg; \
+    /opt/btls/bin/bee2cmd st rng; \
+    echo 'bee2cmd runs in the runtime image; st alg and st rng passed'
+
 # Атрибуция едет ВНУТРИ образа, а не только в репозитории. Apache-2.0 §4 обязывает
 # отдать получателю копию лицензии и сохранённые уведомления — а получает он образ,
 # в репозиторий он может не заглянуть никогда. bee2evp, bee2 и OpenSSL под Apache-2.0,
@@ -289,7 +350,7 @@ RUN chmod 0644 /usr/share/licenses/*
 # тогда их надо усиливать, а не оставлять как есть.
 RUN set -eu; \
     for f in bee2evp-LICENSE.txt bee2-LICENSE.txt openssl-LICENSE.txt nginx-LICENSE \
-             LICENSE NOTICE; do \
+             whereami-LICENSE.txt LICENSE NOTICE; do \
       test -s "/usr/share/licenses/$f" || { echo "нет или пуст: $f" >&2; exit 1; }; \
     done; \
     for f in bee2evp-LICENSE.txt bee2-LICENSE.txt openssl-LICENSE.txt; do \
@@ -299,7 +360,9 @@ RUN set -eu; \
     grep -q 'Redistribution and use in source and binary forms' /usr/share/licenses/nginx-LICENSE; \
     grep -q 'MIT License' /usr/share/licenses/LICENSE; \
     grep -q 'MODIFICATIONS' /usr/share/licenses/NOTICE; \
-    echo 'атрибуция на месте: 4 лицензии апстримов + LICENSE + NOTICE'
+    grep -q 'WTFPL' /usr/share/licenses/whereami-LICENSE.txt; \
+    grep -q 'Gregory Pakosz' /usr/share/licenses/whereami-LICENSE.txt; \
+    echo 'атрибуция на месте: 5 лицензий апстримов + LICENSE + NOTICE'
 
 # Unprivileged. The listen port is >1024 and every writable path is /tmp, so nothing
 # here wants root.
