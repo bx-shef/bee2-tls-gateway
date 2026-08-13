@@ -46,7 +46,22 @@ def git(*args):
 
 
 def restore():
-    git("checkout", "--", *MUTATED)
+    """Вернуть мутируемые файлы к состоянию HEAD.
+
+    ⚠ Код возврата ПРОВЕРЯЕТСЯ и жалоба идёт в stderr. `git checkout` умеет не сработать —
+    например, проиграв гонку за `.git/index.lock` соседнему процессу, который читает
+    `git status` в цикле (так делает scripts/check-mutations-harness.sh). Молчаливый
+    неоткат — это ровно #39 с другой стороны: мутация остаётся, а прогон идёт дальше как
+    ни в чём не бывало. Здесь мы не можем ничего исправить (нас могли вызвать из
+    обработчика сигнала), но обязаны хотя бы сказать вслух.
+    """
+    p = git("checkout", "--", *MUTATED)
+    if p.returncode != 0:
+        print(
+            f"FAIL откат не сработал (git checkout вернул {p.returncode}): "
+            f"{p.stderr.strip()[:200]}",
+            file=sys.stderr,
+        )
 
 
 def _on_signal(signum, _frame):
