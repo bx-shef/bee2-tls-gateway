@@ -1,0 +1,80 @@
+name: pins
+
+# Слежение за отставанием пинов от апстрима (#5).
+#
+# ⚠ ОТДЕЛЬНЫЙ workflow, а не шаг в `ci`, и это не вкусовщина. Проверка ходит в сеть, а
+# значит зависит от чужой доступности; попади она в обязательный статус-чек — падение
+# nginx.org останавливало бы мержи. Здесь она не может никого заблокировать.
+#
+# ⚠ У отчёта ОБЯЗАН быть адресат. Красная джоба в репозитории, куда никто не смотрит, — это
+# то же самое, что отсутствие джобы, и об этом прямо сказано в задаче. Поэтому при
+# расхождении заводится (или обновляется) issue: она попадёт в список задач, а не в
+# историю прогонов, которую не открывают.
+
+on:
+  schedule:
+    # Раз в неделю, понедельник 06:00 UTC. Чаще незачем: релизы апстримов выходят не
+    # ежедневно, а лишний шум делает отчёт фоновым и потому невидимым.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Нужно, чтобы завести issue с отчётом — это и есть тот самый адресат.
+  issues: write
+
+concurrency:
+  group: pins
+  cancel-in-progress: false
+
+jobs:
+  drift:
+    name: drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Сверка пинов с апстримом
+        id: drift
+        run: |
+          set -uo pipefail
+          # Код 10 — «нашлись расхождения», 0 — «нет», 1 — «скрипт сломался».
+          # Различать обязательно: сломавшаяся проверка не должна выглядеть как чистый прогон.
+          out=$(bash scripts/check-pin-drift.sh 2>&1)
+          rc=$?
+          echo "$out"
+          {
+            echo "## Пины против апстрима"
+            echo
+            echo '```'
+            echo "$out"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Многострочный вывод в output — через разделитель, иначе обрежется первой строкой.
+          {
+            echo "report<<PINS_EOF"
+            echo "$out"
+            echo "PINS_EOF"
+            echo "rc=$rc"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$rc" -eq 1 ]; then
+            echo "::error::проверка пинов сломалась — это не «расхождений нет»"
+            exit 1
+          fi
+          exit 0
+
+      - name: Завести или обновить issue с отчётом
+        if: steps.drift.outputs.rc == '10'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPORT: ${{ steps.drift.outputs.report }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # Вся логика в python: тело issue содержит кавычки, обратные апострофы и
+          # переводы строк, и собирать его шеллом значит воевать с экранированием там,
+          # где ошибка тихо испортит текст, а не уронит шаг.
+          python3 scripts/report-pin-drift.py
