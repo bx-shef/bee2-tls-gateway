@@ -159,6 +159,24 @@ RUN set -eu; \
     cp /src/bee2evp/openssl/LICENSE.txt /licenses/openssl-LICENSE.txt; \
     echo 'licenses collected: bee2evp, bee2, openssl'
 
+# ⚠ whereami — ТРЕТЬЯ СТОРОНА ВНУТРИ bee2, и до #19 её здесь не было по честной причине:
+# она компилируется только в `bee2cmd`, а `bee2cmd` в образ не ехал. Теперь едет (самотест
+# при старте), значит едет и этот код — и его атрибуция стала обязательной.
+# ⚠ Отдельного файла лицензии у него нет: она живёт заголовком в самом исходнике. Поэтому
+# вырезаем заголовок ИЗ СОБРАННОГО ДЕРЕВА, а не переписываем руками — то же правило, что и
+# выше: переписанная копия расходится с апстримом молча.
+RUN set -eu; \
+    { echo 'whereami — third-party code inside bee2 (bee2/cmd/core/whereami.c),'; \
+      echo 'compiled into the bee2cmd binary that this image ships.'; \
+      echo 'Verbatim licence header from the source tree this image was built from:'; \
+      echo; \
+      sed -n '1,4p' /src/bee2evp/bee2/cmd/core/whereami.c; \
+    } > /licenses/whereami-LICENSE.txt; \
+    grep -q 'WTFPL' /licenses/whereami-LICENSE.txt; \
+    grep -q 'MIT' /licenses/whereami-LICENSE.txt; \
+    grep -q 'Gregory Pakosz' /licenses/whereami-LICENSE.txt; \
+    echo 'licenses collected: whereami (shipped inside bee2cmd)'
+
 # =================================================================================
 # Stage 2 — nginx linked against THAT OpenSSL
 # =================================================================================
@@ -329,7 +347,7 @@ RUN chmod 0644 /usr/share/licenses/*
 # тогда их надо усиливать, а не оставлять как есть.
 RUN set -eu; \
     for f in bee2evp-LICENSE.txt bee2-LICENSE.txt openssl-LICENSE.txt nginx-LICENSE \
-             LICENSE NOTICE; do \
+             whereami-LICENSE.txt LICENSE NOTICE; do \
       test -s "/usr/share/licenses/$f" || { echo "нет или пуст: $f" >&2; exit 1; }; \
     done; \
     for f in bee2evp-LICENSE.txt bee2-LICENSE.txt openssl-LICENSE.txt; do \
@@ -339,7 +357,9 @@ RUN set -eu; \
     grep -q 'Redistribution and use in source and binary forms' /usr/share/licenses/nginx-LICENSE; \
     grep -q 'MIT License' /usr/share/licenses/LICENSE; \
     grep -q 'MODIFICATIONS' /usr/share/licenses/NOTICE; \
-    echo 'атрибуция на месте: 4 лицензии апстримов + LICENSE + NOTICE'
+    grep -q 'WTFPL' /usr/share/licenses/whereami-LICENSE.txt; \
+    grep -q 'Gregory Pakosz' /usr/share/licenses/whereami-LICENSE.txt; \
+    echo 'атрибуция на месте: 5 лицензий апстримов + LICENSE + NOTICE'
 
 # Unprivileged. The listen port is >1024 and every writable path is /tmp, so nothing
 # here wants root.

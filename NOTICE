@@ -30,11 +30,21 @@ bee2 — cryptographic library implementing STB 34.101 (bign, belt, hbelt, ...)
     same organisation that hosts bee2evp, and it is GPL-3.0. It is not used
     here. Do not attribute this image to it.
 
-    Not shipped, and therefore not attributed here: bee2 also carries third-party code
-    (whereami by Gregory Pakosz, dual WTFPL-2/MIT) in cmd/core/. That file is compiled
-    only into the bee2cmd command-line tool, which this image does not contain — the
-    runtime stage copies libbee2evp.so, libcrypto.so.3, libssl.so.3 and the openssl
-    binary, and nothing from bee2cmd.
+whereami (third-party code inside bee2, and SHIPPED since #19)
+    https://github.com/gpakosz/whereami
+    Copyright Gregory Pakosz
+    Dual licensed under the WTFPL v2 and the MIT licence
+    — /usr/share/licenses/whereami-LICENSE.txt
+
+    Lives in bee2 as cmd/core/whereami.c and is compiled only into the bee2cmd
+    command-line tool. Until #19 that tool was not part of the image, and this section
+    said so. It is part of the image now: bee2cmd performs the crypto self-test at
+    container start (see README, "Самотестирование криптостека"), so the code it
+    contains ships too and has to be attributed.
+
+    The upstream carries no separate licence file for it — the terms live in the
+    header of the source file. /usr/share/licenses/whereami-LICENSE.txt therefore
+    quotes that header verbatim, cut from the very tree this image was built from.
 
 OpenSSL
     https://github.com/openssl/openssl
