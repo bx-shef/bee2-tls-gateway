@@ -38,8 +38,22 @@ nginx 1.28.0
     BSD 2-Clause License — /usr/share/licenses/nginx-LICENSE
 
 Debian 12 (bookworm) provides the base image and the packages gettext-base and
-libpcre2-8-0. They are redistributed unmodified; their source and licenses are
-available from the Debian project at https://www.debian.org/distrib/packages.
+libpcre2-8-0, along with the C library and the other base-system packages that
+come with the image.
+
+    Some of these are under copyleft licenses (glibc is LGPL-2.1+, gettext-base
+    is GPL-3.0+, and the base system carries further GPL/LGPL packages). They
+    are redistributed here BINARY-ONLY and COMPLETELY UNMODIFIED, exactly as
+    published by Debian.
+
+    Written offer for the corresponding source: the source packages for every
+    Debian binary in this image are published by the Debian project and can be
+    obtained from https://snapshot.debian.org/ (which keeps the exact versions
+    that were installed) or from https://www.debian.org/distrib/packages. The
+    base image is pinned by digest in the Dockerfile, so the exact package
+    versions in any given image are reproducible from that pin. If you cannot
+    retrieve them there, open an issue on this repository and we will provide
+    them.
 
 --------------------------------------------------------------------------------
 MODIFICATIONS (Apache License 2.0, Section 4(b))
