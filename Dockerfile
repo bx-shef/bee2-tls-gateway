@@ -122,6 +122,30 @@ RUN set -eu; \
     /opt/btls/bin/openssl ciphers -v 'ALL:eNULL' | grep -q 'DHT-BIGN-WITH-BELT-CTR-MAC-HBELT'; \
     echo 'BTLS suites present'
 
+# bee2cmd — эталонная утилита самого bee2: `st alg` гоняет контрольные примеры стандартов
+# (СТБ 34.101.31/.45/.47/.77), `st rng` — самотест ДСЧ, `es print` — здоровье источников
+# энтропии. Она едет в рантайм-образ и там становится САМОТЕСТОМ ПРИ СТАРТЕ (#18), а не
+# просто инструментом: см. README § «Самотестирование криптостека», где эта возможность
+# описана как документированная — именно этого требует СТБ 34.101.27, и именно это
+# снимает возражение «лишний бинарь увеличивает объект испытаний» (#19).
+#
+# ⚠ Собирается ИЗ ПОДМОДУЛЯ `/src/bee2evp/bee2`, а не отдельным клоном. Это не экономия
+# времени, а инвариант: подмодуль уже выставлен на коммит, соответствующий запиненному
+# BEE2EVP_COMMIT, и уже несёт патч PR #77. Отдельный клон пришлось бы пинить вторым
+# числом, и он разошёлся бы с образом молча — ровно то, что `scripts/check-pins.sh`
+# вынужден сторожить у `check-crypto.sh` (там клон отдельный, потому что скрипт умеет
+# работать и вне образа).
+#
+# Самотест прогоняется ПРЯМО ЗДЕСЬ и падает сборкой: криптостек, который не сходится с
+# контрольными примерами стандарта, не должен доехать до рантайма ни при каких условиях.
+RUN set -eu; \
+    cmake -S /src/bee2evp/bee2 -B /src/bee2-build -DCMAKE_BUILD_TYPE=Release > /dev/null; \
+    cmake --build /src/bee2-build --parallel > /dev/null; \
+    install -m 0755 /src/bee2-build/cmd/bee2cmd /opt/btls/bin/bee2cmd; \
+    /opt/btls/bin/bee2cmd st alg; \
+    /opt/btls/bin/bee2cmd st rng; \
+    echo 'bee2cmd built from the pinned submodule; st alg and st rng passed'
+
 # Тексты лицензий берём ИЗ ТОГО ЖЕ дерева, которое только что собрали, а не переписываем
 # в репозиторий руками: переписанная копия расходится с апстримом молча и ровно тогда,
 # когда её придёт читать аудитор. `set -eu` + явный cp делают это гейтом — переедет
@@ -226,6 +250,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=btls /opt/btls/lib/libcrypto.so.3 /opt/btls/lib/libssl.so.3 /opt/btls/lib/libbee2evp.so /opt/btls/lib/
 COPY --from=btls /opt/btls/bin/openssl /opt/btls/bin/openssl
+# ⚠ ДОКУМЕНТИРОВАННАЯ ВОЗМОЖНОСТЬ, а не инструмент, забытый в образе. bee2cmd здесь ради
+# самотеста при старте (entrypoint.sh §0) — требование СТБ 34.101.27 к изделию, и так же
+# сделано в сертифицированном AvTunProxy, который печатает `self-test result: OK` в первых
+# строках лога. Описана в README § «Самотестирование криптостека»; решение положить её
+# именно в рантайм — docs/PROCESS.md §5 и docs/CERTIFICATION.md §6.
+COPY --from=btls /opt/btls/bin/bee2cmd /opt/btls/bin/bee2cmd
 COPY --from=btls /opt/btls/openssl.cnf /opt/btls/openssl.cnf
 COPY --from=nginx-build /opt/nginx /opt/nginx
 
@@ -266,6 +296,16 @@ RUN set -eu; \
       -CAfile /etc/crypto-gw/ca/gossuok-bundle.pem \
       /etc/crypto-gw/ca/bank-leaf-reference.pem \
     && echo 'BTLS suites present and GosSUOK bundle verifies the reference bank certificate'
+
+# Gate 5 — bee2cmd РАБОТАЕТ в рантайме, а не только в сборочной стадии. Та же логика, что
+# у гейта 3 выше: собранное дерево и отобранный набор файлов — разные вещи. Бинарь мог
+# слинковаться с библиотекой, которая осталась в стадии `btls`, и тогда самотест при
+# старте падал бы у каждого, кто запустил образ, — то есть проба, введённая ради
+# надёжности, стала бы причиной отказа. Ловим здесь, при сборке.
+RUN set -eu; \
+    /opt/btls/bin/bee2cmd st alg; \
+    /opt/btls/bin/bee2cmd st rng; \
+    echo 'bee2cmd runs in the runtime image; st alg and st rng passed'
 
 # Атрибуция едет ВНУТРИ образа, а не только в репозитории. Apache-2.0 §4 обязывает
 # отдать получателю копию лицензии и сохранённые уведомления — а получает он образ,
