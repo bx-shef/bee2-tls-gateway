@@ -109,6 +109,11 @@ jobs:
     # Сборка криптостека из исходников идёт долго; отдельный job, чтобы быстрые проверки
     # отдавали результат, не дожидаясь её.
     timeout-minutes: 45
+    permissions:
+      contents: read
+      # Нужно только для публикации в GHCR на шаге ниже; на pull request не используется,
+      # потому что сам шаг туда не заходит.
+      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -155,3 +160,52 @@ jobs:
           # Работает непривилегированным.
           test "$(docker exec gw-smoke id -u)" = 10001
           docker rm -f gw-smoke
+
+      # ---- публикация в GHCR (#14) -------------------------------------------------
+      # Только с main и только после смоука. Публикуется ТОТ ЖЕ образ, который сейчас
+      # проверили: не пересборка с `push: true`, а `docker tag` уже загруженного слоя.
+      # Пересборка дала бы другой digest и означала бы, что наружу уехали биты, которых
+      # смоук не касался.
+      - name: Логин в GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Публикация образа
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          # Имя пакета — в нижнем регистре: GHCR не принимает заглавные, а owner/repo
+          # могут их содержать.
+          repo=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          image="ghcr.io/${repo}"
+
+          # sha-<коммит> — НЕПОДВИЖНЫЙ тег: один коммит, один образ, навсегда.
+          # v1 — ПОДВИЖНЫЙ алиас: его двигает каждый мерж в main. Он существует только
+          # чтобы у потребителя было что прописать до первого релиза; пинить прод по нему
+          # нельзя, и в README это сказано прямо.
+          docker tag bee2-tls-gateway:ci "${image}:sha-${GITHUB_SHA}"
+          docker tag bee2-tls-gateway:ci "${image}:v1"
+          docker push "${image}:sha-${GITHUB_SHA}"
+          docker push "${image}:v1"
+
+          # Digest — единственный идентификатор, который стоит прописывать в прод.
+          # Печатаем его в сводку джобы, чтобы не искать в логах.
+          # ⚠ `|| true`: образ уже опубликован, и уронить джобу на форматировании отчёта
+          # значит соврать про результат — публикация состоялась, красный цвет скажет
+          # обратное. Пустой digest здесь заметен глазом, а не ломает выкат.
+          digest=$(docker inspect --format='{{index .RepoDigests 0}}' "${image}:v1" 2>/dev/null || true)
+          [ -n "$digest" ] || digest='(не определился — взять из вывода docker push выше)'
+          {
+            echo "## Образ опубликован"
+            echo
+            echo '```'
+            echo "неподвижный тег: ${image}:sha-${GITHUB_SHA}"
+            echo "подвижный алиас: ${image}:v1"
+            echo "для прода:       ${digest}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "digest для прода: ${digest}"
