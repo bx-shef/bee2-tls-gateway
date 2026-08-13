@@ -83,6 +83,12 @@ jobs:
       - name: Пины согласованы между файлами
         run: bash scripts/check-pins.sh
 
+      # Список путей — единственная граница безопасности шлюза, и с #7 её собирает КОД из
+      # строки оператора. Значит у границы появились свои ошибки, и вот они проверяются:
+      # что можно выразить, что нельзя, и что пустой список закрывает всё, а не открывает.
+      - name: Генератор allowlist (что нельзя выразить через GW_ALLOW)
+        run: bash scripts/check-allowlist.sh
+
       # Сторож сторожей: ломает конфиг и пины нарочно и требует, чтобы шаги выше
       # покраснели — иначе проверка, которая никогда не краснеет, неотличима в CI от
       # работающей. Так была найдена мёртвая проверка про переменные nginx (см. шапку).
@@ -160,6 +166,55 @@ jobs:
           # Работает непривилегированным.
           test "$(docker exec gw-smoke id -u)" = 10001
           docker rm -f gw-smoke
+
+          # ---- allowlist действительно приходит из конфигурации (#7) ----------------
+          # Утверждаем СНАРУЖИ и на ДРУГОМ списке: если бы пути остались зашиты в образ,
+          # этот запуск вёл бы себя ровно как предыдущий, и подмена осталась бы незаметной.
+          docker run -d --name gw-allow -p 127.0.0.1:1081:1080 \
+            -e GW_UPSTREAM_HOST=127.0.0.1 -e GW_UPSTREAM_PORT=9345 \
+            -e GW_ALLOW='GET /open-banking-dcr/' \
+            bee2-tls-gateway:ci
+          for _ in $(seq 1 20); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' gw-allow)" = healthy ] && break
+            sleep 2
+          done
+          docker logs gw-allow
+          test "$(docker inspect -f '{{.State.Health.Status}}' gw-allow)" = healthy
+          code2() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+          # Новый путь разрешён. Утверждаем КОНКРЕТНЫЙ код, а не «не 404»: `!= 404` проходит
+          # и на curl-овом 000, то есть остался бы зелёным на шлюзе, который вообще молчит.
+          # Апстрима нет, значит разрешённый путь обязан дать 502 — это и есть доказательство,
+          # что запрос дошёл до proxy_pass, а не был отвергнут границей.
+          test "$(code2 http://127.0.0.1:1081/open-banking-dcr/register)" = 502
+          # А прежний, зашитый в образ, теперь закрыт — доказательство, что список сменился.
+          test "$(code2 http://127.0.0.1:1081/open-banking/v1.0/accounts)" = 404
+          # ⚠ Метод: список разрешает только GET, значит POST на ТОТ ЖЕ путь обязан дать 403.
+          # Единственное место во всём проекте, где `limit_except` реально исполняется:
+          # check-allowlist.sh выходит по GW_ALLOW_DUMP до nginx -t и видит лишь текст.
+          # Без этой строки половина каждой записи GW_ALLOW не проверена ничем.
+          test "$(code2 -X POST http://127.0.0.1:1081/open-banking-dcr/register)" = 403
+          # И метка маршрута в логе — та, что сгенерирована из НАСТРОЕННОГО пути. Если бы
+          # карта меток разъехалась с маршрутами, лог показывал бы route=none на разрешённом
+          # запросе, то есть врал бы оператору, а все проверки кодов оставались бы зелёными.
+          docker logs gw-allow 2>&1 | grep -q 'route=open-banking-dcr .*status=502'
+          docker rm -f gw-allow
+
+          # ---- пустой список закрывает всё, а не открывает --------------------------
+          docker run -d --name gw-deny -p 127.0.0.1:1082:1080 \
+            -e GW_UPSTREAM_HOST=127.0.0.1 -e GW_UPSTREAM_PORT=9345 \
+            -e GW_ALLOW='' \
+            bee2-tls-gateway:ci
+          for _ in $(seq 1 20); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' gw-deny)" = healthy ] && break
+            sleep 2
+          done
+          docker logs gw-deny
+          test "$(docker inspect -f '{{.State.Health.Status}}' gw-deny)" = healthy
+          code3() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+          test "$(code3 http://127.0.0.1:1082/healthz)" = 200
+          test "$(code3 http://127.0.0.1:1082/open-banking/v1.0/accounts)" = 404
+          test "$(code3 http://127.0.0.1:1082/open-banking-dcr/register)" = 404
+          docker rm -f gw-deny
 
       # ---- публикация в GHCR (#14) -------------------------------------------------
       # Только с main и только после смоука. Публикуется ТОТ ЖЕ образ, который сейчас

@@ -39,11 +39,14 @@ http {
     # location. `limit_except`'s deny runs in an implicit child context, so a `set` in the
     # parent location never executes for a rejected method — and the 403s, which are the
     # log lines an operator most wants to identify, would come out with an empty route.
+    # ⚠ Метки маршрутов приезжают из того же GW_ALLOW, что и сами маршруты (#7), — иначе
+    # при смене путей лог показывал бы `route=none` на разрешённом запросе, и оператор
+    # читал бы неправду. Метка строится из НАСТРОЕННОГО пути, не из пути запроса: в
+    # запросе ездит номер счёта.
     map $uri $gw_route {
-        default                                          none;
-        ~^/open-banking-authorize/v1\.0/oauth2/token$     token;
-        ~^/open-banking/v1\.0/                            ob;
-        /healthz                                         health;
+        default    none;
+        /healthz   health;
+        include /tmp/crypto-gw.routes-map.conf;
     }
 
     # Sized for a background poll, not for a crowd. All traffic arrives from our own
@@ -136,27 +139,15 @@ http {
             return 200 "ok\n";
         }
 
-        # POST /open-banking-authorize/v1.0/oauth2/token — client_credentials,
-        # authorization_code, refresh_token and private_key_jwt all land here.
-        location = /open-banking-authorize/v1.0/oauth2/token {
-            limit_except POST { deny all; }
-            limit_req zone=gw burst=${GW_BURST} nodelay;
-            # `$uri$is_args$args`, not a bare `proxy_pass https://bank;`. Bare form forwards
-            # the RAW request target, while the allowlist above matched the NORMALISED one —
-            # so a caller on this network could get past the location check with a path whose
-            # raw bytes still carry `../` segments for the bank's own stack to resolve
-            # differently. Sending the normalised path closes that gap.
-            proxy_pass https://bank$uri$is_args$args;
-        }
-
-        # /open-banking/v1.0/… — consents, account list, statement/transaction create
-        # (POST) and poll (GET).
-        location /open-banking/v1.0/ {
-            limit_except GET POST { deny all; }
-            limit_req zone=gw burst=${GW_BURST} nodelay;
-            # Normalised path — see the note on the token location above.
-            proxy_pass https://bank$uri$is_args$args;
-        }
+        # Разрешённые маршруты приезжают ОТСЮДА, а не выписаны здесь: их генерирует
+        # entrypoint.sh из GW_ALLOW (#7). Пути — это API конкретного банка, а образ про
+        # банк не знает ничего: хост апстрима давно переменная, теперь и пути тоже.
+        #
+        # ⚠ Файл содержит ТОЛЬКО РАЗРЕШЕНИЯ. Отказ по умолчанию ниже и `/healthz` выше
+        # живут здесь структурно, и никакая конфигурация их не отменяет: пустой или
+        # незаполненный список даёт «не разрешено ничего», а не «разрешено всё». Это
+        # свойство формы, а не проверка, которую можно забыть прогнать.
+        include /tmp/crypto-gw.routes.conf;
 
         # Everything else is refused HERE rather than relayed. An open relay to a bank
         # is worth more to an attacker than anything else on this network.
