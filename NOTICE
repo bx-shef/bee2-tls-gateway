@@ -8,6 +8,12 @@ A copy of each license below is shipped inside the image under
 /usr/share/licenses/ and is copied there from the very source tree that was
 compiled, not transcribed by hand.
 
+Component VERSIONS are deliberately not repeated here. They are pinned in the
+Dockerfile (ARG BEE2EVP_COMMIT / OPENSSL_TAG / NGINX_VERSION / DEBIAN_IMAGE),
+and a version written out in this file would be a second source of truth that
+drifts silently on the first bump while CI stays green — the licenses and the
+obligations below do not depend on the version anyway.
+
 --------------------------------------------------------------------------------
 bee2evp — EVP interfaces over bee2, an OpenSSL engine
     https://github.com/bcrypto/bee2evp
@@ -24,14 +30,18 @@ bee2 — cryptographic library implementing STB 34.101 (bign, belt, hbelt, ...)
     same organisation that hosts bee2evp, and it is GPL-3.0. It is not used
     here. Do not attribute this image to it.
 
-    bee2 embeds third-party code: whereami by Gregory Pakosz (MIT).
+    Not shipped, and therefore not attributed here: bee2 also carries third-party code
+    (whereami by Gregory Pakosz, dual WTFPL-2/MIT) in cmd/core/. That file is compiled
+    only into the bee2cmd command-line tool, which this image does not contain — the
+    runtime stage copies libbee2evp.so, libcrypto.so.3, libssl.so.3 and the openssl
+    binary, and nothing from bee2cmd.
 
-OpenSSL 3.5.6
+OpenSSL
     https://github.com/openssl/openssl
     Copyright The OpenSSL Project Authors
     Apache License 2.0 — /usr/share/licenses/openssl-LICENSE.txt
 
-nginx 1.28.0
+nginx
     https://nginx.org/
     Copyright (C) 2002-2021 Igor Sysoev
     Copyright (C) 2011-2025 Nginx, Inc.
@@ -53,7 +63,8 @@ come with the image.
     base image is pinned by digest in the Dockerfile, so the exact package
     versions in any given image are reproducible from that pin. If you cannot
     retrieve them there, open an issue on this repository and we will provide
-    them.
+    them. This offer is valid for at least three years from the date the image
+    carrying it was published, as GPL-2.0 section 3(b) requires.
 
 --------------------------------------------------------------------------------
 MODIFICATIONS (Apache License 2.0, Section 4(b))

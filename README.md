@@ -133,9 +133,13 @@ MIT-фрагмент `whereami`. Apache-2.0 §4 обязывает отдать 
 тексты лежат **внутри образа**:
 
 ```bash
-docker run --rm bee2-tls-gateway ls /usr/share/licenses/
+docker run --rm --entrypoint ls bee2-tls-gateway /usr/share/licenses/
 # LICENSE  NOTICE  bee2-LICENSE.txt  bee2evp-LICENSE.txt  nginx-LICENSE  openssl-LICENSE.txt
 ```
+
+⚠ `--entrypoint ls` обязателен: `ENTRYPOINT` образа — это `entrypoint.sh`, он не читает
+аргументы и без `GW_UPSTREAM_HOST` откажется стартовать. Команда выше — способ
+**посмотреть** глазами; собственно проверкой служит гейт 4 при каждой сборке.
 
 Кто что и откуда, плюс перечень наших правок чужих исходников (патч BTLS к OpenSSL и
 починка `scripts/source.sh` у bee2evp — этого требует Apache-2.0 §4(b)) — в
