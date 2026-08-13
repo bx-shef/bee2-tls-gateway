@@ -94,11 +94,12 @@ def mutate(name, apply_fn, want, script="scripts/check-config.sh"):
 if git("status", "--porcelain", "--", *MUTATED).stdout.strip():
     sys.exit(f"FAIL мутируемые файлы изменены — откат идёт через git, прерываю")
 
-for script in ("scripts/check-config.sh", "scripts/check-pins.sh"):
+for script in ("scripts/check-config.sh", "scripts/check-pins.sh",
+               "scripts/check-allowlist.sh"):
     rc, out = run_checks(script)
     if rc != 0:
         sys.exit(f"FAIL базовая линия КРАСНАЯ у {script} — чинить его, а не мутации:\n{out}")
-results.append(("ok", "базовая линия без мутаций", "зелёная у обоих сторожей"))
+results.append(("ok", "базовая линия без мутаций", "зелёная у всех сторожей"))
 
 # --- envsubst: список переменных против плейсхолдеров шаблона ---------------------
 mutate("плейсхолдер шаблона отсутствует в списке envsubst",
@@ -153,14 +154,14 @@ mutate("DHT-BIGN переставлен перед DHE-BIGN",
 mutate("location / проксирует вместо отказа (открытый релей)",
        lambda: sub(TPL, r"location / \{\n            return 404;",
                    "location / {\n            proxy_pass https://bank$uri;"),
-       "проксируются только известные префиксы")
+       "нет захардкоженных проксирующих маршрутов")
 
 mutate("проксируемый префикс вне allowlist",
        lambda: sub(TPL, r"        location / \{",
                    "        location /admin/ {\n"
                    "            proxy_pass https://bank$uri;\n"
                    "        }\n\n        location / {"),
-       "проксируются только известные префиксы")
+       "нет захардкоженных проксирующих маршрутов")
 
 mutate("отказ по умолчанию заменён на 200",
        lambda: sub(TPL, r"location / \{\n            return 404;",
@@ -194,6 +195,41 @@ mutate("NGINX_SHA256 обрезан",
 mutate("BEE2_COMMIT в check-crypto.sh перестал быть sha",
        lambda: sub(CR, r"^BEE2_COMMIT=\S+$", "BEE2_COMMIT=master"),
        "похож на полный sha", PINS)
+
+# --- allowlist: граница безопасности собирается кодом, значит у кода есть ошибки -----
+ALLOW = "scripts/check-allowlist.sh"
+
+# ⚠ Мутация вскрыла, ЧТО именно несёт нагрузку: не запрет скобок, а запрет ПРОБЕЛОВ.
+# Директиву nginx без пробела не подставить, поэтому первым срабатывает именно этот тест —
+# и `want` назван по нему, а не по красивому «подстановка директив».
+mutate("регулярка пути ослаблена — в путь проходят пробелы и скобки",
+       lambda: sub(EP, r'\[\[ "\$path" =~ \^/\[A-Za-z0-9\._~/-\]\*\$ \]\]',
+                   '[[ "$path" =~ ^/.*$ ]]'),
+       "путь с пробелом отвергается", ALLOW)
+
+mutate("снят запрет префикса «/» — открытый релей к банку",
+       lambda: sub(EP, r'\[\[ -n "\$exact" \|\| "\$path" != "/" \]\]',
+                   '[[ -n "$exact" || "$path" != "///" ]]'),
+       "префикс «/» отвергается", ALLOW)
+
+# Запирает дефект, найденный при написании check-allowlist.sh: `:=` подставляет умолчание
+# и на ПУСТУЮ строку, поэтому явное «не разрешать ничего» молча возвращало пути банка.
+mutate("умолчание GW_ALLOW снова затирает пустую строку (:= вместо -)",
+       lambda: sub(EP, r'^GW_ALLOW="\$\{GW_ALLOW-', 'GW_ALLOW="${GW_ALLOW:-'),
+       "пустой GW_ALLOW не порождает маршрутов", ALLOW)
+
+mutate("снято требование завершающего / у префикса — матчил бы соседние пути",
+       lambda: sub(EP, r'\[\[ -n "\$exact" \|\| "\$path" == \*/ \]\]',
+                   '[[ -n "$exact" || "$path" == * ]]'),
+       "префикс без завершающего / отвергается", ALLOW)
+
+mutate("снята проверка дубликатов — nginx ушёл бы в цикл перезапусков",
+       lambda: sub(EP, r'\*" \$key "\*\) die', '*" NEVERMATCH "*) die'),
+       "один путь дважды отвергается", ALLOW)
+
+mutate("include карты маршрутов удалён — весь лог стал бы route=none",
+       lambda: sub(TPL, r"\n\s*include /tmp/crypto-gw\.routes-map\.conf;", ""),
+       "метки маршрутов для лога тоже подключаются")
 
 restore()
 

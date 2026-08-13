@@ -21,9 +21,9 @@
 | Сборка bee2 | проверено вживую | стадия `btls` в `Dockerfile`, пин коммита `2ae3c71e` |
 | Сборка OpenSSL с провайдером bee2 | проверено вживую | `openssl-3.5.6` + патч libssl, три гейта сборки |
 | Сборка nginx | сделано, вживую не перепроверено | `1.30.4` (stable) — ушли с legacy 1.28 из-за CVE-2026-1642 и CVE-2026-42533; **нужен живой прогон против банка** ([#15](https://github.com/bx-shef/bee2-tls-gateway/issues/15)) |
-| Конфигурация nginx (BTLS наружу, HTTP внутрь) | проверено вживую | `nginx.conf.template`, allowlist путей — единственная граница |
+| Конфигурация nginx (BTLS наружу, HTTP внутрь) | проверено вживую | `nginx.conf.template`; allowlist путей — единственная граница, задаётся `GW_ALLOW` ([#7](https://github.com/bx-shef/bee2-tls-gateway/issues/7)), отказ по умолчанию структурен |
 | Работа с сертификатами ГосСУОК | сделано | `ca/`, два стартовых гейта + предупреждение о сроках за 90 дн. и еженедельная проверка; процедура замены — `PROCESS.md` §4 ([#4](https://github.com/bx-shef/bee2-tls-gateway/issues/4)) |
-| Тесты | сделано | `scripts/check-config.sh` (намерение) + смоук в job `image` (поведение) + `scripts/check-pins.sh` (пины согласованы) + `scripts/check-config-mutations.sh` (сами проверки живы) |
+| Тесты | сделано | `scripts/check-config.sh` (намерение) + смоук в job `image` (поведение) + `scripts/check-pins.sh` (пины согласованы) + `scripts/check-allowlist.sh` (что нельзя выразить через GW_ALLOW) + `scripts/check-config-mutations.sh` (сами проверки живы) |
 | Лицензии и атрибуция | сделано | `NOTICE`, тексты апстримов в образе, гейт 4; план Б — `PROCESS.md` §5 ([#6](https://github.com/bx-shef/bee2-tls-gateway/issues/6)) |
 | Развёртывание | сделано, вживую не проверено | публикация в GHCR при мерже в `main` после смоука; прод пинится по `@sha256:`, `v1` — подвижный алиас ([#14](https://github.com/bx-shef/bee2-tls-gateway/issues/14)) |
 

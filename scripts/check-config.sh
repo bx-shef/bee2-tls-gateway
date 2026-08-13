@@ -134,9 +134,21 @@ for b in blocks:
     head = b if nxt == -1 else b[:nxt]
     if "proxy_pass" in head:
         proxied.append(re.match(r"(?:=\s+)?(\S+)", b).group(1))
-expected = ["/open-banking-authorize/v1.0/oauth2/token", "/open-banking/v1.0/"]
-check("проксируются только известные префиксы", sorted(proxied) == expected,
-      f"ожидалось {expected}, найдено {sorted(proxied)}")
+# Маршруты к банку с версии #7 генерирует entrypoint.sh из GW_ALLOW и приносит
+# include'ом. В САМОМ шаблоне проксирующих location быть не должно: вернувшийся сюда
+# литеральный путь означал бы, что кто-то снова зашил API конкретного банка в образ —
+# и, что хуже, обошёл проверку формата, которую генератор делает над GW_ALLOW.
+check("в шаблоне нет захардкоженных проксирующих маршрутов", not proxied,
+      f"найдены прямо в шаблоне: {sorted(proxied)}")
+check("маршруты подключаются include'ом из сгенерированного файла",
+      re.search(r"include\s+/tmp/crypto-gw\.routes\.conf;", directives) is not None,
+      "include /tmp/crypto-gw.routes.conf; не найден")
+# Пропажа этого include НЕ ломает ни сборку, ни старт: nginx поднимется, запросы пойдут, а
+# каждая строка лога будет route=none. Оператор потеряет единственный признак того, какая
+# ветка allowlist отработала, — и не узнает об этом, потому что всё зелёное.
+check("метки маршрутов для лога тоже подключаются",
+      re.search(r"include\s+/tmp/crypto-gw\.routes-map\.conf;", directives) is not None,
+      "include /tmp/crypto-gw.routes-map.conf; не найден")
 check("всё остальное отвергается", re.search(r"location\s+/\s*\{[^}]*return 404;", directives) is not None,
       "location / { … return 404; } не найден")
 

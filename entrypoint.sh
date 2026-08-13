@@ -96,15 +96,167 @@ for cert in "$ca_split"/cert-*.pem; do
 done
 rm -rf "$ca_split"
 
+# --- 2c. allowlist путей из конфигурации (#7) ---------------------------------------
+# Список путей — ЕДИНСТВЕННАЯ граница безопасности шлюза, и раньше он был выписан
+# литеральными `location` в шаблоне. Пути одного конкретного банка внутри образа, вся
+# посылка которого в том, что он не знает ни про какой банк, — и любой новый эндпоинт
+# (например /open-banking-dcr/) требовал правки шаблона и пересборки.
+#
+# ⚠ ГЛАВНОЕ СВОЙСТВО КОНСТРУКЦИИ: отсюда приходят ТОЛЬКО РАЗРЕШЕНИЯ. Отказ по умолчанию
+# (`location / { return 404; }`) и `/healthz` живут в шаблоне структурно, и никакая
+# конфигурация их не отменяет. Поэтому пустой список даёт «не разрешено ничего», а не
+# «разрешено всё» — это не проверка, которую можно забыть, а форма самой конструкции.
+#
+# Формат: записи через `;`, в каждой «МЕТОДЫ путь». `=` перед путём — точное совпадение,
+# без него — префикс. Синтаксис намеренно повторяет nginx, чтобы не заводить второе
+# понятие для того же самого:
+#   GW_ALLOW='POST =/open-banking-authorize/v1.0/oauth2/token; GET,POST /open-banking/v1.0/'
+# ⚠ `${VAR-...}`, а НЕ `${VAR:=...}`. Разница здесь принципиальная, и она уже стоила
+# дефекта: `:=` подставляет значение и на ПУСТУЮ строку, поэтому `GW_ALLOW=''` — явное
+# «не разрешать ничего» — молча возвращал бы пути банка обратно. Пойман тестом
+# scripts/check-allowlist.sh, не глазами.
+#   переменная не задана → умолчание (совместимость с тем, что уже развёрнуто);
+#   задана пустой        → НЕ РАЗРЕШЕНО НИЧЕГО, и это законная конфигурация.
+GW_ALLOW="${GW_ALLOW-POST =/open-banking-authorize/v1.0/oauth2/token; GET,POST /open-banking/v1.0/}"
+[[ "$GW_BURST" =~ ^[0-9]+$ ]] || die "GW_BURST должен быть числом, а не «$GW_BURST»: он уходит в конфиг nginx"
+[[ "$GW_RATE" =~ ^[0-9]+$ ]] || die "GW_RATE должен быть числом, а не «$GW_RATE»"
+
+ROUTES=/tmp/crypto-gw.routes.conf
+
+# ⚠ GW_ALLOW — текст от оператора, который становится конфигурацией nginx. Без строгой
+# проверки `GW_ALLOW='GET /x { } location / { proxy_pass https://bank; }'` открыл бы релей
+# к банку. Поэтому разбор посимвольно строгий, а всё непонятое — фатально: битая
+# конфигурация может быть только ошибкой, а ошибка в границе безопасности не то место,
+# где стоит угадывать намерение.
+ROUTE_MAP=/tmp/crypto-gw.routes-map.conf
+: > "$ROUTES"
+: > "$ROUTE_MAP"
+allow_count=0
+seen_paths=""
+seen_labels=""
+# `set -f` не украшение: `for entry in $GW_ALLOW` разворачивается ЕЩЁ И как glob, и сейчас
+# это не стреляет лишь потому, что запись всегда содержит пробел. Граница безопасности не
+# должна зависеть от того, что в рабочем каталоге не оказалось файла с подходящим именем.
+set -f
+saved_ifs="$IFS"
+IFS=';'
+for entry in $GW_ALLOW; do
+  IFS="$saved_ifs"
+  entry="$(printf '%s' "$entry" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+  [[ -n "$entry" ]] || { IFS=';'; continue; }
+
+  methods="${entry%% *}"
+  path="${entry#* }"
+  path="$(printf '%s' "$path" | sed 's/^[[:space:]]*//')"
+
+  [[ "$methods" =~ ^[A-Z]+(,[A-Z]+)*$ ]] \
+    || die "GW_ALLOW: методы «$methods» не похожи на список вида GET,POST (запись: $entry)"
+  for m in ${methods//,/ }; do
+    case "$m" in
+      GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS) ;;
+      *) die "GW_ALLOW: неизвестный метод «$m» (запись: $entry)" ;;
+    esac
+  done
+
+  exact=""
+  if [[ "$path" == "="* ]]; then exact="= "; path="${path#=}"; fi
+  # Ни пробелов, ни `{}`, ни `;`, ни `$` — только то, из чего состоит путь. Это и есть
+  # защита от подстановки директив.
+  [[ "$path" =~ ^/[A-Za-z0-9._~/-]*$ ]] \
+    || die "GW_ALLOW: путь «$path» содержит недопустимые символы (запись: $entry)"
+  # Префикс `/` разрешил бы вообще всё и превратил бы шлюз в открытый релей к банку —
+  # ровно то, ради предотвращения чего список и существует.
+  [[ -n "$exact" || "$path" != "/" ]] \
+    || die 'GW_ALLOW: префикс «/» разрешает всё и превращает шлюз в открытый релей'
+  # ⚠ Префикс в nginx — совпадение по НАЧАЛУ СТРОКИ, а не по границе сегмента пути:
+  # `location /open-banking` матчит и `/open-banking-admin`, и `/open-bankingXYZ`, и всё это
+  # уедет в банк. Оператор такого не имел в виду. Хочешь один путь — пиши `=`, хочешь
+  # поддерево — ставь слеш; третьего смысла у префикса без слеша нет.
+  [[ -n "$exact" || "$path" == */ ]] \
+    || die "GW_ALLOW: префикс «$path» без завершающего / матчит и соседние пути (например ${path}-admin). Допишите / или используйте =$path"
+
+  # nginx падает с «duplicate location» и уводит контейнер в цикл перезапусков, а
+  # GW_ALLOW_DUMP этого не покажет — он выходит раньше nginx -t. Ловим здесь и по-русски.
+  key="${exact}${path}"
+  case " $seen_paths " in
+    *" $key "*) die "GW_ALLOW: путь «$key» указан дважды — nginx откажется стартовать (duplicate location). Объедините методы в одну запись: GET,POST $path" ;;
+  esac
+  seen_paths="$seen_paths $key"
+  # `/healthz` живёт в шаблоне структурно; вторая такая же локация — тот же duplicate.
+  [[ "$key" != "= /healthz" && "$path" != "/healthz" ]] \
+    || die 'GW_ALLOW: /healthz занят шлюзом (проба живости) и не может быть переопределён'
+
+  {
+    printf '        location %s%s {\n' "$exact" "$path"
+    printf '            limit_except %s { deny all; }\n' "${methods//,/ }"
+    printf '            limit_req zone=gw burst=%s nodelay;\n' "$GW_BURST"
+    # `$uri$is_args$args`, а не голый `proxy_pass https://bank;`. Голая форма шлёт СЫРОЙ
+    # request-target, тогда как location сматчился по УЖЕ НОРМАЛИЗОВАННОМУ пути — и
+    # звонящий из этой сети мог бы пройти проверку путём, чьи сырые байты несут `../`
+    # для стека банка. Отправляя нормализованный путь, разрыв «проверили одно, отправили
+    # другое» закрываем.
+    # shellcheck disable=SC2016  # одинарные кавычки НАМЕРЕННО: $uri, $is_args и $args —
+    # переменные NGINX, они обязаны попасть в конфиг буквально. Раскройся они здесь, в
+    # конфиг уехала бы пустая строка, и proxy_pass отправил бы запрос в корень апстрима.
+    printf '            proxy_pass https://bank$uri$is_args$args;\n'
+    printf '        }\n\n'
+  } >> "$ROUTES"
+
+  # Метка маршрута для лога. ⚠ Это НАСТРОЕННЫЙ путь, а не путь запроса: в запросе ездит
+  # номер счёта, и ему в агрегации логов делать нечего. Настроенный префикс постоянен и
+  # безопасен, поэтому метка из него — можно.
+  label="$(printf '%s' "$path" | tr -c 'A-Za-z0-9' '-' | sed 's/--*/-/g; s/^-//; s/-$//' | cut -c1-40)"
+  [[ -n "$label" ]] || label="route${allow_count}"
+  # Разные пути могут дать ОДНУ метку: `tr -c` схлопывает `.` и `_` в `-`, а `cut` режет
+  # длинные до общего префикса. Молча — значит оператор не отличит два эндпоинта в
+  # агрегации, поэтому различаем номером.
+  case " $seen_labels " in
+    *" $label "*) label="${label}-${allow_count}" ;;
+  esac
+  seen_labels="$seen_labels $label"
+  if [[ -n "$exact" ]]; then
+    printf '    %s %s;\n' "$path" "$label" >> "$ROUTE_MAP"
+  else
+    # Префикс — регуляркой, с экранированной точкой: `v1.0` иначе совпал бы с `v1X0`.
+    printf '    ~^%s %s;\n' "$(printf '%s' "$path" | sed 's/\./\\./g')" "$label" >> "$ROUTE_MAP"
+  fi
+
+  allow_count=$((allow_count + 1))
+  IFS=';'
+done
+IFS="$saved_ifs"
+set +f
+
+log "allowlist: разрешено маршрутов — $allow_count (всё остальное 404)"
+[[ "$allow_count" -gt 0 ]] || log 'ВНИМАНИЕ: allowlist ПУСТ — наружу не пройдёт ни один запрос, кроме /healthz'
+
+# Выгрузка сгенерированного и выход — без nginx и без запуска. Нужна двум разным людям:
+# оператору («что именно получится из моего GW_ALLOW, до выката») и проверке
+# scripts/check-allowlist.sh, которая иначе не смогла бы дотянуться до генератора,
+# запертого внутри entrypoint. Граница безопасности обязана быть проверяемой снаружи.
+# Именно `== 1`: `GW_ALLOW_DUMP=0` — естественный способ написать «выключено», и на
+# `-n` он бы сработал как «включено», а контейнер молча никогда не начал бы обслуживать.
+if [[ "${GW_ALLOW_DUMP:-}" == 1 ]]; then
+  echo "--- routes ---"
+  cat "$ROUTES"
+  echo "--- route map ---"
+  cat "$ROUTE_MAP"
+  exit 0
+fi
+
 # --- 3. render ---------------------------------------------------------------------
 # Explicit allowlist: without it envsubst would also eat nginx's own $status,
 # $upstream_status, $binary_remote_addr … and the config would not even parse.
+# ⚠ GW_BURST здесь НЕТ намеренно: с версии #7 он подставляется генератором маршрутов
+# напрямую в bash, а в шаблоне его плейсхолдера не осталось. Оставь его в списке —
+# проверка «в списке envsubst нет переменных, которых нет в шаблоне» покраснеет, и
+# правильно сделает: список и шаблон обязаны совпадать.
 export GW_LISTEN GW_UPSTREAM_HOST GW_UPSTREAM_PORT GW_CA_BUNDLE GW_KEEPALIVE \
-       GW_RATE GW_BURST GW_CONNECT_TIMEOUT GW_READ_TIMEOUT GW_ERROR_LOG_LEVEL
+       GW_RATE GW_CONNECT_TIMEOUT GW_READ_TIMEOUT GW_ERROR_LOG_LEVEL
 # shellcheck disable=SC2016  # одинарные кавычки НАМЕРЕННО: это SHELL-FORMAT
 # для envsubst — список имён, которые он подставит. Раскройся они здесь, envsubst получил бы
 # уже подставленные значения и не заменил бы в шаблоне ничего.
-envsubst '${GW_LISTEN} ${GW_UPSTREAM_HOST} ${GW_UPSTREAM_PORT} ${GW_CA_BUNDLE} ${GW_KEEPALIVE} ${GW_RATE} ${GW_BURST} ${GW_CONNECT_TIMEOUT} ${GW_READ_TIMEOUT} ${GW_ERROR_LOG_LEVEL}' \
+envsubst '${GW_LISTEN} ${GW_UPSTREAM_HOST} ${GW_UPSTREAM_PORT} ${GW_CA_BUNDLE} ${GW_KEEPALIVE} ${GW_RATE} ${GW_CONNECT_TIMEOUT} ${GW_READ_TIMEOUT} ${GW_ERROR_LOG_LEVEL}' \
   < "$TEMPLATE" > "$RENDERED"
 
 nginx -t -c "$RENDERED" || die 'nginx отверг конфигурацию (вывод выше)'
