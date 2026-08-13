@@ -12,6 +12,7 @@
 | --- | --- | --- |
 | Защита `main` | сделано | GitHub Ruleset импортирован 13.08.2026, состав — в `CLAUDE.md` |
 | CI (job `ci`) | сделано | shellcheck, синтаксис JSON/YAML, проверки конфига и мутации к ним, штампы `Last reviewed` |
+| Обновление actions и базы образа (dependabot) | заведено, вживую не подтверждено | `.github/dependabot.yml`: actions — еженедельно; база Debian по digest — **разбирает ли dependabot `FROM ${DEBIAN_IMAGE}`, проверяется только после мержа** (Insights → Dependency graph). Не разберёт — слежку за базой переносить в `check-pin-drift.sh` ([#14](https://github.com/bx-shef/bee2-tls-gateway/issues/14)) |
 | CI (job `pins`) | сделано, вживую не проверено | еженедельная сверка пинов с апстримом; при расхождении заводит issue, сборку не блокирует ([#5](https://github.com/bx-shef/bee2-tls-gateway/issues/5)) |
 | CI (job `image`) | сделано | сборка образа (~20 мин) и смоук-запуск; первый живой прогон — PR [#10](https://github.com/bx-shef/bee2-tls-gateway/pull/10) |
 | Правила ведения проекта | сделано | `CLAUDE.md`: конвенции, коммиты, ревью и мерж PR |
