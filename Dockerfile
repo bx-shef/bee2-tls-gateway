@@ -39,8 +39,24 @@ ARG BEE2EVP_COMMIT=2ae3c71e8b24b6904367850e5963933236a1539f
 # `proxy_ssl_verify on` + `proxy_ssl_name` make this image do on every request to the bank.
 # Verified locally with this pin: engine available, 8 BTLS suites, GosSUOK chain verifies.
 ARG OPENSSL_TAG=openssl-3.5.6
-ARG NGINX_VERSION=1.28.0
-ARG NGINX_SHA256=c6b5c6b086c0df9d3ca3ff5e084c1d0ef909e6038279c71c1c3e985f576ff76a
+# ⚠ Ушли с ветки 1.28 (была 1.28.0) на STABLE 1.30.x, и это не гигиена, а закрытие двух дыр.
+#   - CVE-2026-1642, SSL upstream injection: при проксировании на TLS-апстрим атакующий с
+#     MITM-позиции со стороны апстрима мог внедрить открытый текст в ответ. Ровно то, чем
+#     занят образ. Исправлено в 1.28.2+.
+#   - CVE-2026-42533, heap overflow, severity major. Срабатывает в двух случаях: capture-группы
+#     в regex у `map` (у нас их нет) ЛИБО не кэшируемая переменная в строковом выражении —
+#     а `proxy_pass https://bank$uri$is_args$args` это оно и есть: `$args` и `$is_args`
+#     объявлены NGX_HTTP_VAR_NOCACHEABLE. Исправление — bounds-check
+#     `ngx_http_script_check_length`, и в 1.30.4 он стоит В ТОМ ЧИСЛЕ в ngx_http_proxy_module.c,
+#     то есть ровно на нашем пути. В ветке 1.28 этой функции нет вообще и не будет: ветка
+#     legacy, а «Not vulnerable» у advisory перечисляет только 1.31.3+ и 1.30.4+.
+# ⚠ Смена минорной версии на платёжном пути: после бампа ОБЯЗАТЕЛЕН живой прогон против
+#   банка (README § «Проверено вживую»), сборка и смоук его не заменяют. См. #15.
+ARG NGINX_VERSION=1.30.4
+# sha256 снят с архива, скачанного с nginx.org, и проверен двумя способами: тем же приёмом
+# заново посчитан хеш прежнего пина 1.28.0 и совпал с ним (значит способ верный), а сам
+# архив несёт годную подпись сопровождающего (ключ nginx.org/keys/arut.key).
+ARG NGINX_SHA256=4261dc90e9e47c1c4041276e9aaa3d48ebe2e664f728e14fa95ae6c67d57a08b
 
 # =================================================================================
 # Stage 1 — BTLS: OpenSSL patched with the STB 34.101.65 ciphersuites + bee2evp engine
