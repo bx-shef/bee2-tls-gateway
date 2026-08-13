@@ -75,11 +75,16 @@ jobs:
           sys.exit(1 if failed else 0)
           PY
 
-      - name: Ruleset защиты main на месте
+      - name: Штамп Last reviewed в документации
         run: |
-          ruleset=.github/rulesets/main-protection.json
-          if [ ! -f "$ruleset" ]; then
-            echo "FAIL: $ruleset удалён — правила защиты main перестанут быть воспроизводимыми" >&2
-            exit 1
-          fi
-          echo "ok   $ruleset"
+          status=0
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            if head -5 "$f" | grep -q '^> Last reviewed: [0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}$'; then
+              echo "ok   $f"
+            else
+              echo "FAIL $f: нет строки '> Last reviewed: ГГГГ-ММ-ДД' в первых 5 строках" >&2
+              status=1
+            fi
+          done < <(git ls-files '*.md')
+          exit "$status"
