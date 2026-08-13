@@ -1,0 +1,55 @@
+Взято ДОСЛОВНО из открытого PR апстрима: https://github.com/agievich/bee2/pull/77
+Чинит issue https://github.com/agievich/bee2/issues/76 (открыта 18.06.2026, автор
+miniusercoder, метки enhancement + rng, назначена на agievich).
+
+Суть дефекта: rngJitterIsAvail() — проверка доступности источника `jitter` — сама
+вызывает tmCtrStart(), а тот поднимает поток-счётчик `while (_tm_ctr_loop)
+_tm_ctr_ticks++`. Закрывается поток только через utilOnExit, то есть при выходе
+процесса. rngCreate() опрашивает все шесть источников безусловно, поэтому ЛЮБОЙ
+процесс, once вызвавший rngCreate(), жжёт одно ядро до конца своей жизни.
+
+Замерено у нас (docs/PROCESS.md §5, issue #8): процесс, который вызывает
+rngCreate(0, 0) и дальше просто спит пять секунд, тратит user 5,089 с без патча
+и user 0,003 с с патчем. Контрольные примеры (st alg) и самотест ДСЧ (st rng)
+после патча проходят.
+
+⚠ Это НЕ наша правка криптоядра. Мы принимаем чужой открытый PR, который висит
+без ревью с 18.06.2026. Как только он будет смержен в апстриме — патч отсюда
+удаляется, а пин bee2evp двигается на версию с исправлением. Своего форка bee2
+у нас нет и заводить его мы не хотим: на сертификационных испытаниях исходные
+тексты читают два эксперта, и «взяли открытый PR апстрима» защищать проще, чем
+«придумали сами».
+
+diff --git a/src/core/rng/rng_timer.c b/src/core/rng/rng_timer.c
+index 6e5168cc..688efc51 100644
+--- a/src/core/rng/rng_timer.c
++++ b/src/core/rng/rng_timer.c
+@@ -114,6 +114,7 @@ err_t rngTimerRead(void* buf, size_t* read, size_t count)
+ static volatile bool_t _tm_ctr_loop;		/*< счетчик запущен? */
+ static volatile tm_ticks_t _tm_ctr_ticks;	/*< текущее показание */
+ static volatile tm_ticks_t _tm_ctr_ticks2;	/*< предыдущее показание */
++static bool_t _tm_ctr_close_registered;		/*< закрытие зарегистрировано? */
+
+ #ifdef OS_WIN
+
+@@ -221,11 +222,12 @@ static bool_t tmCtrStart()
+ 	if (!tmCtrCreate())
+ 		return FALSE;
+ 	// зарегистрировать закрытие
+-	if (!utilOnExit(tmCtrClose))
++	if (!_tm_ctr_close_registered && !utilOnExit(tmCtrClose))
+ 	{
+ 		tmCtrClose();
+ 		return FALSE;
+ 	}
++	_tm_ctr_close_registered = TRUE;
+ 	return TRUE;
+ }
+
+@@ -345,5 +347,6 @@ err_t rngJitterRead(void* buf, size_t* read, size_t count)
+ 	}
+ 	CLEAN3(ticks, t, w);
+ 	*read = count;
++	tmCtrClose();
+ 	return ERR_OK;
+ }

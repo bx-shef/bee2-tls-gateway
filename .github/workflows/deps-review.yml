@@ -1,0 +1,49 @@
+name: deps-review
+
+# Полугодовое напоминание разобрать зависимости.
+#
+# ⚠ Не дублирует `pins.yml`. Тот отвечает на вопрос «вышло ли что-то новее» и делает это
+# еженедельно. Здесь — вопросы, которые накапливаются медленно и потому не замечаются
+# вовсе: жив ли апстрим, не сменилась ли лицензия, не смержили ли чужой патч, который мы
+# держим у себя в `patches/`. Такое не ломается в конкретный день — оно просто однажды
+# оказывается дорогим.
+#
+# ⚠ Адресат обязателен. Напоминание, которое уходит в историю прогонов, — это отсутствие
+# напоминания. Поэтому заводится issue: она попадает в список задач.
+
+on:
+  schedule:
+    # 1 февраля и 1 августа, 06:00 UTC — ровно раз в полгода. Cron не умеет «каждые
+    # шесть месяцев», поэтому два фиксированных месяца; числа выбраны подальше от
+    # праздников и отпусков, чтобы задача не появлялась в мёртвую неделю.
+    - cron: "0 6 1 2,8 *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Нужно, чтобы завести issue с чеклистом — это и есть адресат.
+  issues: write
+
+concurrency:
+  group: deps-review
+  cancel-in-progress: false
+
+jobs:
+  review:
+    name: review
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Завести issue с чеклистом
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # Дату берём здесь, а не в python: так она видна в логе шага и одинакова
+          # в теле issue и в прогоне.
+          DATE="$(date -u +%Y-%m-%d)" python3 scripts/open-deps-review.py
