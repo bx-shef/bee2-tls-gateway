@@ -50,15 +50,26 @@ call = re.search(r"envsubst\s+'([^']+)'", entrypoint)
 if not call:
     print("FAIL entrypoint.sh: вызов envsubst с кавычным списком не найден", file=sys.stderr)
     sys.exit(1)
-allowlist = set(re.findall(r"\$\{([A-Z0-9_]+)\}", call.group(1)))
+# ⚠ Имена ловим ЛЮБЫЕ, а не только ПРОПИСНЫЕ, и обе формы — `${NAME}` и `$NAME`
+#   (envsubst принимает обе). Прежняя регулярка `\$\{([A-Z0-9_]+)\}` пропускала ровно то,
+#   ради чего написана проверка 4 ниже: переменные nginx СТРОЧНЫЕ ($status, $uri, $args),
+#   так что попади они в SHELL-FORMAT — в allowlist они бы не попали, и проверка не
+#   покраснела бы НИКОГДА. Проверено запуском envsubst (nginx:1.27-alpine):
+#     envsubst '${status} ${GW_LISTEN}'  →  log_format gw "status= rt=$request_time";
+#   nginx такой конфиг принимает и стартует, поле в логе просто исчезает — то есть без
+#   этой проверки поломка молчаливая, и найдётся она по пустой колонке в агрегации.
+allowlist = set(re.findall(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", call.group(1)))
+# Проверки 1 и 2 — про наши собственные переменные; всё, что не GW_, разбирает проверка 4,
+# иначе одна и та же чужая переменная краснела бы дважды разными словами.
+gw_allowlist = {v for v in allowlist if v.startswith("GW_")}
 
 # 1. Промах оставит в отрендеренном конфиге буквальный `${GW_…}`, и nginx не стартует.
-missing = sorted(placeholders - allowlist)
+missing = sorted(placeholders - gw_allowlist)
 check("каждый плейсхолдер шаблона есть в списке envsubst", not missing, f"нет в списке: {missing}")
 
 # 2. Безвредно в рантайме, но значит, что переменную выкинули из шаблона, а документация
 #    оператору всё ещё обещает, что она что-то делает.
-unused = sorted(allowlist - placeholders)
+unused = sorted(gw_allowlist - placeholders)
 check("в списке envsubst нет переменных, которых нет в шаблоне", not unused, f"лишние: {unused}")
 
 # 3. Иначе `set -u` в entrypoint.sh уронит контейнер на неустановленной переменной — с голым
@@ -72,7 +83,7 @@ check("у каждой подставляемой переменной есть 
 # 4. envsubst заменяет КАЖДОЕ перечисленное имя. Попади в список рантайм-переменная nginx
 #    ($status, $binary_remote_addr, …) — её заменило бы пустой строкой, и формат лога или
 #    лимитер тихо сломались бы.
-nginx_owned = sorted(v for v in allowlist if not v.startswith("GW_"))
+nginx_owned = sorted(allowlist - gw_allowlist)
 check("переменные nginx не попали в список envsubst", not nginx_owned, f"чужие: {nginx_owned}")
 
 # 5. Номер счёта ездит в URL (/open-banking/v1.0/accounts/<IBAN>/statements) — путь не должен
