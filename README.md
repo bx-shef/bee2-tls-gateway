@@ -101,7 +101,26 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:1080/healthz   # 200
 ⚠ **`v1` — подвижный алиас, а не версия.** Он существует, чтобы потребителю было что
 прописать до первого релиза. Прописать его в `docker-compose.prod.yml` — значит согласиться,
 что TLS-терминатор на платёжном пути молча меняется под ногами при каждом мерже. Прод
-пинится по `@sha256:` — digest печатается в сводке джобы `image` при каждой публикации.
+пинится по `@sha256:`.
+
+**Как узнать digest.** Он печатается в сводке джобы `image` при каждой публикации строкой
+`digest для прода:`, но искать его там нужно, зная нужный прогон. Спросить реестр напрямую
+проще и отвечает на другой вопрос — «куда `v1` показывает **прямо сейчас**»:
+
+```bash
+# без docker и без логина: пакет публичный, токен выдаётся анонимно
+TOKEN=$(curl -s "https://ghcr.io/token?service=ghcr.io&scope=repository:bx-shef/bee2-tls-gateway:pull" \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
+curl -sI -H "Authorization: Bearer $TOKEN" \
+  -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json" \
+  https://ghcr.io/v2/bx-shef/bee2-tls-gateway/manifests/v1 \
+  | grep -i docker-content-digest
+```
+
+⚠ Этот же запрос — проверка, что пакет **действительно публичный**: если токен выдаётся
+анонимно и манифест отдаётся, значит `docker compose pull` у потребителя пройдёт без
+`docker login`. Настройка видимости в интерфейсе GitHub этого не доказывает — она может
+быть выставлена и не применена, а прод там ходит без логина.
 
 ```bash
 docker pull ghcr.io/bx-shef/bee2-tls-gateway:v1
