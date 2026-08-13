@@ -1,0 +1,86 @@
+bee2-tls-gateway
+Copyright (c) 2026 Igor Shevchik
+
+This product is distributed under the MIT License (see LICENSE).
+
+The container image built from this repository bundles third-party components.
+A copy of each license below is shipped inside the image under
+/usr/share/licenses/ and is copied there from the very source tree that was
+compiled, not transcribed by hand.
+
+Component VERSIONS are deliberately not repeated here. They are pinned in the
+Dockerfile (ARG BEE2EVP_COMMIT / OPENSSL_TAG / NGINX_VERSION / DEBIAN_IMAGE),
+and a version written out in this file would be a second source of truth that
+drifts silently on the first bump while CI stays green — the licenses and the
+obligations below do not depend on the version anyway.
+
+--------------------------------------------------------------------------------
+bee2evp — EVP interfaces over bee2, an OpenSSL engine
+    https://github.com/bcrypto/bee2evp
+    Copyright The Bee2evp authors
+    Apache License 2.0 — /usr/share/licenses/bee2evp-LICENSE.txt
+
+bee2 — cryptographic library implementing STB 34.101 (bign, belt, hbelt, ...)
+    https://github.com/agievich/bee2
+    Copyright The Bee2 authors
+    Apache License 2.0 — /usr/share/licenses/bee2-LICENSE.txt
+
+    Note: bee2 is pulled in as the `bee2` submodule of bee2evp and comes from
+    agievich/bee2. A DIFFERENT repository named bcrypto/bee2 exists under the
+    same organisation that hosts bee2evp, and it is GPL-3.0. It is not used
+    here. Do not attribute this image to it.
+
+    Not shipped, and therefore not attributed here: bee2 also carries third-party code
+    (whereami by Gregory Pakosz, dual WTFPL-2/MIT) in cmd/core/. That file is compiled
+    only into the bee2cmd command-line tool, which this image does not contain — the
+    runtime stage copies libbee2evp.so, libcrypto.so.3, libssl.so.3 and the openssl
+    binary, and nothing from bee2cmd.
+
+OpenSSL
+    https://github.com/openssl/openssl
+    Copyright The OpenSSL Project Authors
+    Apache License 2.0 — /usr/share/licenses/openssl-LICENSE.txt
+
+nginx
+    https://nginx.org/
+    Copyright (C) 2002-2021 Igor Sysoev
+    Copyright (C) 2011-2025 Nginx, Inc.
+    BSD 2-Clause License — /usr/share/licenses/nginx-LICENSE
+
+Debian 12 (bookworm) provides the base image and the packages gettext-base and
+libpcre2-8-0, along with the C library and the other base-system packages that
+come with the image.
+
+    Some of these are under copyleft licenses (glibc is LGPL-2.1+, gettext-base
+    is GPL-3.0+, and the base system carries further GPL/LGPL packages). They
+    are redistributed here BINARY-ONLY and COMPLETELY UNMODIFIED, exactly as
+    published by Debian.
+
+    Written offer for the corresponding source: the source packages for every
+    Debian binary in this image are published by the Debian project and can be
+    obtained from https://snapshot.debian.org/ (which keeps the exact versions
+    that were installed) or from https://www.debian.org/distrib/packages. The
+    base image is pinned by digest in the Dockerfile, so the exact package
+    versions in any given image are reproducible from that pin. If you cannot
+    retrieve them there, open an issue on this repository and we will provide
+    them. This offer is valid for at least three years from the date the image
+    carrying it was published, as GPL-2.0 section 3(b) requires.
+
+--------------------------------------------------------------------------------
+MODIFICATIONS (Apache License 2.0, Section 4(b))
+
+Third-party sources are modified during the build of this image, at build time
+by the Dockerfile in this repository. The modified sources themselves are not
+redistributed — only the resulting binaries are.
+
+  * OpenSSL is patched with the BTLS patch shipped by bee2evp
+    (btls/patch/<openssl-tag>.patch), which adds the STB 34.101.65
+    ciphersuites to libssl. That patch is authored and distributed by the
+    bee2evp project, not by us; we only apply it.
+
+  * bee2evp's scripts/source.sh is patched to fix a numeric-versus-string
+    comparison (`-eq` where `==` was meant) that otherwise forces every
+    OpenSSL build into --debug, i.e. -O0. See the comment at that RUN step in
+    the Dockerfile.
+
+No other third-party source file is modified.

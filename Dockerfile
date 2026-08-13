@@ -86,6 +86,19 @@ RUN set -eu; \
     /opt/btls/bin/openssl ciphers -v 'ALL:eNULL' | grep -q 'DHT-BIGN-WITH-BELT-CTR-MAC-HBELT'; \
     echo 'BTLS suites present'
 
+# Тексты лицензий берём ИЗ ТОГО ЖЕ дерева, которое только что собрали, а не переписываем
+# в репозиторий руками: переписанная копия расходится с апстримом молча и ровно тогда,
+# когда её придёт читать аудитор. `set -eu` + явный cp делают это гейтом — переедет
+# апстрим свой LICENSE.txt, и сборка встанет здесь, а не отдаст образ без атрибуции.
+# Пути заданы bee2evp: scripts/source.sh кладёт bee2 в ./bee2, а openssl клонирует в
+# ./openssl рядом с ними.
+RUN set -eu; \
+    mkdir -p /licenses; \
+    cp /src/bee2evp/LICENSE.txt         /licenses/bee2evp-LICENSE.txt; \
+    cp /src/bee2evp/bee2/LICENSE.txt    /licenses/bee2-LICENSE.txt; \
+    cp /src/bee2evp/openssl/LICENSE.txt /licenses/openssl-LICENSE.txt; \
+    echo 'licenses collected: bee2evp, bee2, openssl'
+
 # =================================================================================
 # Stage 2 — nginx linked against THAT OpenSSL
 # =================================================================================
@@ -155,6 +168,12 @@ RUN set -eu; \
     ldd /opt/nginx/sbin/nginx | grep -E 'libssl|libcrypto' | grep -q '/opt/btls/lib'; \
     echo "nginx linked against the patched OpenSSL ${expected}"
 
+# Та же логика, что и для криптостека: лицензия nginx едет из распакованного архива,
+# который сейчас собирали. /licenses уже существует — стадия наследует его от `btls`.
+RUN set -eu; \
+    cp "/src/nginx-${NGINX_VERSION}/LICENSE" /licenses/nginx-LICENSE; \
+    echo 'licenses collected: nginx'
+
 # =================================================================================
 # Stage 3 — runtime. No compiler, no git, no source.
 # =================================================================================
@@ -211,6 +230,40 @@ RUN set -eu; \
       -CAfile /etc/crypto-gw/ca/gossuok-bundle.pem \
       /etc/crypto-gw/ca/bank-leaf-reference.pem \
     && echo 'BTLS suites present and GosSUOK bundle verifies the reference bank certificate'
+
+# Атрибуция едет ВНУТРИ образа, а не только в репозитории. Apache-2.0 §4 обязывает
+# отдать получателю копию лицензии и сохранённые уведомления — а получает он образ,
+# в репозиторий он может не заглянуть никогда. bee2evp, bee2 и OpenSSL под Apache-2.0,
+# nginx под BSD-2-Clause; что именно и откуда — в NOTICE. См. #6.
+COPY --from=nginx-build /licenses/ /usr/share/licenses/
+COPY LICENSE NOTICE /usr/share/licenses/
+# Не полагаемся на режим файлов в исходном дереве: читать их будет непривилегированный
+# `gw`, а гейт ниже исполняется от root и один только root-доступ ничего не доказал бы.
+RUN chmod 0644 /usr/share/licenses/*
+
+# Гейт 4 — атрибуция на месте И ЧИТАЕМА. Без него образ собирается и публикуется без
+# единого текста лицензии, и обнаруживается это на аудите, а не в CI.
+# Почему не только `test -s`: `COPY` несуществующего каталога упал бы сам, пустой файл
+# проехал бы, а обрезанный до одной строки проехал бы даже мимо `test -s`. Поэтому у
+# каждого файла спрашиваем строку, которой в обрезке уже не будет.
+# ⚠ У Apache проверяем И номер версии: обязательства по 2.0 и по 1.1 разные, а `grep
+# 'Apache License'` совпал бы с любой.
+# ⚠ Файлы кладутся `cp` из локального дерева сборки, не тянутся по сети. Появится здесь
+# когда-нибудь `curl` — эти проверки перестанут отличать лицензию от страницы 404, и
+# тогда их надо усиливать, а не оставлять как есть.
+RUN set -eu; \
+    for f in bee2evp-LICENSE.txt bee2-LICENSE.txt openssl-LICENSE.txt nginx-LICENSE \
+             LICENSE NOTICE; do \
+      test -s "/usr/share/licenses/$f" || { echo "нет или пуст: $f" >&2; exit 1; }; \
+    done; \
+    for f in bee2evp-LICENSE.txt bee2-LICENSE.txt openssl-LICENSE.txt; do \
+      grep -q 'Apache License' "/usr/share/licenses/$f"; \
+      grep -q 'Version 2.0' "/usr/share/licenses/$f"; \
+    done; \
+    grep -q 'Redistribution and use in source and binary forms' /usr/share/licenses/nginx-LICENSE; \
+    grep -q 'MIT License' /usr/share/licenses/LICENSE; \
+    grep -q 'MODIFICATIONS' /usr/share/licenses/NOTICE; \
+    echo 'атрибуция на месте: 4 лицензии апстримов + LICENSE + NOTICE'
 
 # Unprivileged. The listen port is >1024 and every writable path is /tmp, so nothing
 # here wants root.
