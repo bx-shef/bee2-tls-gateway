@@ -75,7 +75,7 @@ jobs:
           sys.exit(1 if failed else 0)
           PY
 
-      - name: Конфигурация шлюза (плейсхолдеры, лог, TLS, allowlist)
+      - name: Конфигурация шлюза (плейсхолдеры, лог, TLS, allowlist, самотест)
         run: bash scripts/check-config.sh
 
       # Пины повторяются в нескольких файлах, и копия расходится с Dockerfile молча:
