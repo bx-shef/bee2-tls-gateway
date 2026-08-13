@@ -12,9 +12,11 @@
 
 ## 2. Окружение: AvTunProxy и хосты по СТБ 34.101.65
 
-⚠ **Раздел — кабинетный разбор по доменам, вживую не проверялся.** Прежде чем строить
-на нём решение, факты подтверждаются запуском (см. правило «живые проверки — вживую»
-в `CLAUDE.md`).
+⚠ **Что здесь проверено запуском, а что нет.** Сам перечень хостов (§2.3) снят с живого
+AvTunProxy 5.10.12 — это факт, а не догадка. **Принадлежность доменов организациям и
+наличие у них API определены по именам и открытым источникам**, запросами не
+подтверждены. Прежде чем строить на второй части решение — проверять запуском (правило
+«живые проверки — вживую» в `CLAUDE.md`).
 
 ### 2.1. Что такое AvTunProxy
 
@@ -47,44 +49,232 @@
 ⚠ Цена незнания: отладка «почему не коннектится» на хосте, который по обычному TLS
 не отвечает в принципе. Ошибка выглядит как сетевая, а является криптографической.
 
-### 2.3. Кто стоит за хостами
+### 2.3. Перечень хостов по СТБ 34.101.65
 
-**ЗАО «АВЕСТ» — вендор криптографии** (`*.avest.by`, `avtunproxy.by`, `eid.by`).
-Семантика поддоменов повторяется во всех контурах: `oauth` / `oauthadmin` — сервер
-авторизации и его админка, `legal` — авторизация юрлиц, `avterminal` — серверная
-выработка и проверка ЭЦП, `app` — веб-приложение (в том числе тестовый магазин),
-`cloud-ds` / `cloudsign*` — облачная подпись (в beta-контуре разложена на `api`, `pki`,
-`registry`, `clients`, `storage`), `filestorage`, `tlsintotls` / `avtunproxytunnel` — сам
-туннель. Префиксы `msiqa-` / `msidev-` — окружения МСИ. Для разработчиков АВЕСТ держит
-тестовый магазин, сервер авторизации и тестовую площадку МСИ — это `*.dev.avest.by`
-и `*.test.avest.by`.
+**Список получен запуском, а не выведен из догадок.** AvTunProxy 5.10.12 поднят локально
+(13.08.2026), и с него снят `http://127.0.0.1:10224/proxy.pac` — файл автоконфигурации,
+по которому клиент решает, к какому хосту применять СТБ-рукопожатие, а к какому открыть
+обычный туннель. Внутри — **не маска, а перечень из 115 конкретных хостов** на 23 доменах
+второго уровня. Ниже — 81 из них: инфраструктура самого АВЕСТ убрана, кроме песочницы.
 
-**НКФО «ЕРИП» / МСИ** (`*.raschet.by`) — межбанковская система идентификации. `i*` —
-боевой контур, `t*` / `tb*` / `tp*` — тестовые. Личный кабинет МСИ — `ioauth.raschet.by/client/`.
+⚠ **Приорбанка в этом списке НЕТ — и это самое важное, что о списке нужно знать.**
+Он требует белорусской криптографии, мы проверили это боевым прогоном (README
+§ «Проверено вживую»), но в `proxy.pac` его адресов не значится. Значит список —
+**нижняя граница**, а не полный перечень: отсутствие в нём ничего не доказывает.
 
-**НЦЭУ** (`*.nces.by`) — ГосСУОК: `uas` — боевой, `testusd2` — тестовый УЦ.
+Наши целевые адреса Приорбанка, для памяти:
 
-**Госорганы и ведомственные системы:**
+| Адрес | Контур | Криптография |
+| --- | --- | --- |
+| `apibel.priorbank.by:9345` | **прод** | СКЗИ обязательно, СТБ 34.101.65 |
+| `api.priorbank.by:9344` | тест (sandbox) | обычный TLS |
 
-- `nalog.gov.by` — портал МНС, личный кабинет плательщика;
-- `nbrb.by` — `rvd` — веб-портал регистрации валютных договоров, `asoi` — банковская
-  отчётность;
-- `ssf.gov.by` + `novacom.by` — портал ФСЗН (Новаком — подрядчик);
-- `e-respondent.belstat.gov.by` — электронная отчётность Белстата;
-- `belpost.by` — `mail.npas` — заказные электронные почтовые отправления, `sko` / `sks` —
-  ведомственные.
+⚠ В теле JWT (`aud`) инструкция банка называет **третий** адрес — `api.priorbank.by:9544`.
+Это значение аудитории токена, а не адрес, куда идёт запрос; перепутать их — потерянный
+день. Точное значение берётся из `GET /oidcdiscovery`, а не из примера в PDF.
 
-**СККО и программные кассы:** `skko.by`, `webkassa.by`, `ikassa.by`, `cashbox.by`,
-`rdigital.by`. `iscb` / `isb` / `cjs` / `iopk` — внутренние сервисы операторов,
-`arm` / `cabinet` — рабочие места и личные кабинеты.
+### Что список доказывает и чего не доказывает
 
-**Финансовый сектор:** `openapi.mtbank.by`, `openapi.paritetbank.by`, `ibapi.rrb.by`,
-`edo.bcse.by` (БВФБ), `secure.bidmart.by`.
+- **Наличие в списке ≠ наличие публичного API.** Он говорит только «сюда ходят по
+  белорусской криптографии», и ничего — про то, есть ли там что-то, кроме портала с ЭЦП.
+- **Отсутствие в списке ≠ обычный TLS.** Контрпример — Приорбанк, см. выше.
+- **Технический доступ ≠ право доступа.** До каждого банка и госсистемы нужен договор,
+  и рукопожатие тут ничего не решает.
 
-**Прочее:** `mdom.by` (`komplat` — коммунальные платежи), `podpis.by`.
+### Кто стоит за хостами
 
-⚠ Разбивка сделана по доменным именам. Часть внутренних префиксов (`iopk`, `cjs`, `sks`,
-`maxk`) достоверно не расшифровывается — назначение уточнять у самих операторов.
+| Домен | Хостов | Кто это | Что там |
+| --- | --- | --- | --- |
+| `avest.by` | 8 | ЗАО «АВЕСТ» — **только песочница для разработчиков** | контуры `dev` и `test`: `oauth`, `legal`, `avterminal`, `app` (тестовый магазин), `cloud-ds`. Остальное от вендора убрано, см. ниже |
+| `belpost.by` | 14 | Белпочта | `mail.npas` — заказные электронные отправления, `sko`, `sks`; префикс `test-` — тестовый контур |
+| `raschet.by` | 12 | НКФО «ЕРИП» / МСИ | межбанковская идентификация; `t*` / `tb*` / `tp*` — тестовые контуры |
+| `webkassa.by` | 9 | оператор программных касс | `arm` — рабочее место, `cabinet` — ЛК, `iscb` — внутренний сервис |
+| `nces.by` | 6 | НЦЭУ — ГосСУОК | `uas` — боевой УЦ, `testusd2` — тестовый |
+| `rdigital.by` | 4 | оператор касс | `arm`, `cabinet`, `sko` |
+| `skko.by` | 4 | СККО (кассовое оборудование) | все четыре — **только тестовые** (`test-`) |
+| `cashbox.by` | 3 | оператор касс | — |
+| `nalog.gov.by` | 3 | МНС | `oauth`, `terminal` — вход в ЛК плательщика |
+| `nbrb.by` | 3 | Нацбанк | `rvd` / `rvdrc` — регистрация валютных договоров, `asoi` — банковская отчётность |
+| `ikassa.by` | 2 | оператор касс | — |
+| `mdom.by` | 2 | ЖКХ | `komplat` — коммунальные платежи |
+| `novacom.by` | 2 | подрядчик ФСЗН | `pfszn20`, `lk-pfszn20` |
+| `paritetbank.by` | 2 | **Паритетбанк** | `openapi` — прод, `test-openapi` — sandbox |
+| `mtbank.by` | 1 | **МТБанк** | `openapi` — прод |
+| `rrb.by` | 1 | **РРБ-Банк** | `ibapi` — прод |
+| `bcse.by` | 1 | БВФБ | `edo` — электронный документооборот |
+| `ssf.gov.by` | 1 | ФСЗН | `lk-portal2` |
+| `belstat.gov.by` | 1 | Белстат | только тестовый `test.e-respondent` |
+| `bidmart.by` | 1 | торговая площадка | `secure` |
+| `podpis.by` | 1 | сервис подписи | `app` |
+
+**Открытый банкинг — четыре адреса из списка** (`openapi.mtbank.by`,
+`openapi.paritetbank.by`, `test-openapi.paritetbank.by`, `ibapi.rrb.by`) **плюс Приорбанк,
+которого в списке нет.** Это и есть все банки, до которых у нас уже есть транспорт.
+
+⚠ **Список отфильтрован, и вот как.** В `proxy.pac` 115 хостов, здесь — 81. Убраны
+**34 адреса самого АВЕСТ**: их продуктив (`*.eid.by`, `km.avtunproxy.by`) и внутренние
+контуры `alpha`, `qa`, `beta`, `msidev-`, `msiqa-`, сервисы `cloudsign-beta`,
+`tlsintotls`, `filestorage` и подобное. Это инфраструктура вендора криптографии — нам она
+не цель и не ориентир.
+
+Оставлены **восемь** адресов, и ровно по одной причине: `*.dev.avest.by` и
+`*.test.avest.by` — документированная **песочница для разработчиков**. На ней можно
+проверять рукопожатие, **не имея договора ни с одним банком**, и это ближайший
+практический ход для проекта. Полный перечень 115 адресов при необходимости снимается
+заново одной командой (см. начало раздела).
+
+⚠ Часть префиксов (`iopk`, `cjs`, `isb`, `sks`) достоверно не расшифровывается —
+назначение уточнять у операторов. Принадлежность доменов определена по именам, а не
+подтверждена запросами.
+
+<details>
+<summary>Перечень хостов (81 адрес; инфраструктура АВЕСТ убрана, кроме песочницы)</summary>
+
+**belpost.by** (14)
+
+- `arm.npas.belpost.by`
+- `avterminal.belpost.by`
+- `isks.belpost.by`
+- `itest-sks.belpost.by`
+- `mail.npas.belpost.by`
+- `oauth.belpost.by`
+- `oauthadmin.belpost.by`
+- `sko.belpost.by`
+- `test-arm.npas.belpost.by`
+- `test-avterminal.belpost.by`
+- `test-mail.npas.belpost.by`
+- `test-oauth.belpost.by`
+- `test-oauthadmin.belpost.by`
+- `test-sko.belpost.by`
+
+**raschet.by** (12)
+
+- `avterminal.raschet.by`
+- `legal.raschet.by`
+- `oauth.raschet.by`
+- `tavterminal.raschet.by`
+- `tbavterminal.raschet.by`
+- `tblegal.raschet.by`
+- `tboauth.raschet.by`
+- `tlegal.raschet.by`
+- `toauth.raschet.by`
+- `tpavterminal.raschet.by`
+- `tplegal.raschet.by`
+- `tpoauth.raschet.by`
+
+**webkassa.by** (9)
+
+- `arm.test.webkassa.by`
+- `arm.test2.webkassa.by`
+- `arm.webkassa.by`
+- `cabinet.test.webkassa.by`
+- `cabinet.test2.webkassa.by`
+- `cabinet.webkassa.by`
+- `iscb.test2.webkassa.by`
+- `iscb.webkassa.by`
+- `itest-scb.webkassa.by`
+
+**avest.by** (8)
+
+- `app.dev.avest.by`
+- `avterminal.dev.avest.by`
+- `avterminal.test.avest.by`
+- `cloud-ds.test.avest.by`
+- `legal.dev.avest.by`
+- `legal.test.avest.by`
+- `oauth.dev.avest.by`
+- `oauth.test.avest.by`
+
+**nces.by** (6)
+
+- `app.testusd2.nces.by`
+- `app.uas.nces.by`
+- `oauth.testusd2.nces.by`
+- `oauth.uas.nces.by`
+- `terminal.testusd2.nces.by`
+- `terminal.uas.nces.by`
+
+**rdigital.by** (4)
+
+- `arm.rdigital.by`
+- `cabinet.rdigital.by`
+- `iopk.dev.rdigital.by`
+- `sko.rdigital.by`
+
+**skko.by** (4)
+
+- `test-app.ais.skko.by`
+- `test-oauth.ais.skko.by`
+- `test-oauthadmin.ais.skko.by`
+- `test-terminal.ais.skko.by`
+
+**cashbox.by** (3)
+
+- `arm.cashbox.by`
+- `cabinet.cashbox.by`
+- `iopk.dev.cashbox.by`
+
+**nalog.gov.by** (3)
+
+- `oauth.nalog.gov.by`
+- `oauthadmin.nalog.gov.by`
+- `terminal.nalog.gov.by`
+
+**nbrb.by** (3)
+
+- `asoi.nbrb.by`
+- `rvd.nbrb.by`
+- `rvdrc.nbrb.by`
+
+**ikassa.by** (2)
+
+- `cjs.ikassa.by`
+- `isb.ikassa.by`
+
+**mdom.by** (2)
+
+- `app.mdom.by`
+- `komplat.mdom.by`
+
+**novacom.by** (2)
+
+- `lk-pfszn20.novacom.by`
+- `pfszn20.novacom.by`
+
+**paritetbank.by** (2)
+
+- `openapi.paritetbank.by`
+- `test-openapi.paritetbank.by`
+
+**bcse.by** (1)
+
+- `edo.bcse.by`
+
+**belstat.gov.by** (1)
+
+- `test.e-respondent.belstat.gov.by`
+
+**bidmart.by** (1)
+
+- `secure.bidmart.by`
+
+**mtbank.by** (1)
+
+- `openapi.mtbank.by`
+
+**podpis.by** (1)
+
+- `app.podpis.by`
+
+**rrb.by** (1)
+
+- `ibapi.rrb.by`
+
+**ssf.gov.by** (1)
+
+- `lk-portal2.ssf.gov.by`
+
+</details>
 
 ### 2.4. Наличие API
 
