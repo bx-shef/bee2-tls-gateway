@@ -22,8 +22,12 @@
 # от этого не растёт).
 #
 # Запуск — ВНУТРИ образа, иначе стоковый openssl не знает bign:
-#   docker run --rm -v /куда:/pki --entrypoint bash bee2-tls-gateway:ci \
+#   docker run --rm --user "$(id -u):$(id -g)" -v /куда:/pki \
+#     -v "$PWD/scripts:/scripts:ro" --entrypoint bash bee2-tls-gateway:ci \
 #     /scripts/make-btls-fixture.sh /pki btls-probe-upstream
+# ⚠ `--user` не украшение: без него файлы достаются `gw` (uid 10001), и всё, что потом
+# читает ключ, обязано работать под тем же uid. Кто это забыл — получит от s_server
+# `Permission denied` на своём же ключе; проверено в CI, стоило одного красного прогона.
 set -euo pipefail
 
 OUT="${1:?куда класть PKI (каталог)}"
