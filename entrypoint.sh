@@ -24,7 +24,7 @@ die() { printf '[crypto-gw] FATAL: %s\n' "$*" >&2; exit 1; }
 #   request: "POST /open-banking-authorize/v1.0/oauth2/token HTTP/1.1"
 # for a statement call that path holds the account number. The same failures are already
 # visible in the access log as status=502 with route=, minus the identifier. Raise this
-# to `info` for a live run (README.md § "Что попадает в логи"), then put it back.
+# to `info` for a live run (docs/PROCESS.md §4, "Что попадает в логи"), then put it back.
 : "${GW_ERROR_LOG_LEVEL:=crit}"
 # See README § "Один поток всегда жжёт процессор". bee2 starts a permanent busy-loop
 # thread as an entropy source; niceness is what keeps it out of everyone else's way.
