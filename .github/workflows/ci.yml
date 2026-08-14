@@ -513,7 +513,8 @@ jobs:
           test "$(grep -c 'BEGIN CERTIFICATE' "$PKI/bundle-two.pem")" -eq 2
 
           docker network create btlsnet >/dev/null
-          docker run -d --name btls-upstream --network btlsnet -v "$PKI:/pki:ro" \
+          docker run -d --name btls-upstream --network btlsnet \
+            --network-alias btls-probe-upstream -v "$PKI:/pki:ro" \
             --entrypoint /opt/btls/bin/openssl bee2-tls-gateway:ci \
             s_server -accept 9345 -cert /pki/leaf.crt -key /pki/leaf.key \
             -cipher DHE-BIGN-WITH-BELT-CTR-MAC-HBELT -tls1_2 -www >/dev/null
@@ -544,7 +545,8 @@ jobs:
           # от выключенной: сними кто-нибудь `proxy_ssl_verify on` — и шаг остался бы
           # зелёным, потому что рукопожатие прошло бы вообще без якорей. Здесь в связке
           # ТОЛЬКО посторонний корень: нужного якоря нет, доверять нечему.
-          docker run -d --name btls-upstream2 --network btlsnet -v "$PKI:/pki:ro" \
+          docker run -d --name btls-upstream2 --network btlsnet \
+            --network-alias btls-probe-upstream -v "$PKI:/pki:ro" \
             --entrypoint /opt/btls/bin/openssl bee2-tls-gateway:ci \
             s_server -accept 9345 -cert /pki/leaf.crt -key /pki/leaf.key \
             -cipher DHE-BIGN-WITH-BELT-CTR-MAC-HBELT -tls1_2 -www >/dev/null
