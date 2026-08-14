@@ -478,24 +478,51 @@ jobs:
       # боевого трафика) закрывается офлайн, и владельцу остаётся только настоящий корень
       # ГосСУОК. Если нет — это записывается как барьер, а не как «не успели».
       # Шаг НЕ краснеет: он измеряет, а не утверждает.
-      - name: ЗАМЕР — чем наш стек умеет выпускать bign-ключи и сертификаты
+      - name: ЗАМЕР — свой BTLS-сервер из своего же стека
         run: |
           set -uo pipefail
           docker run --rm --entrypoint bash bee2-tls-gateway:ci -c '
-            t() { printf "\n===== %s\n" "$1"; shift; "$@" 2>&1 | head -25; printf "[код %s]\n" "${PIPESTATUS[0]}"; }
-            t "версия"            openssl version
-            t "движок"            openssl engine -t bee2evp
-            t "алгоритмы ключей"  openssl list -public-key-algorithms
-            t "bee2cmd: команды"  bee2cmd
-            t "bee2cmd: kg"       bee2cmd kg
-            t "genpkey bign-pubkey" openssl genpkey -engine bee2evp -algorithm bign-pubkey -out /tmp/k1.pem
-            t "genpkey bign"      openssl genpkey -engine bee2evp -algorithm bign -out /tmp/k2.pem
-            t "genpkey + params"  openssl genpkey -engine bee2evp -algorithm bign-pubkey \
-                                    -pkeyopt params:bign-curve256v1 -out /tmp/k3.pem
-            t "req -newkey bign"  openssl req -engine bee2evp -x509 -nodes -days 1 \
-                                    -subj /CN=btls-probe -newkey bign-curve256v1 \
-                                    -keyout /tmp/ca.key -out /tmp/ca.crt
-            printf "\n===== что получилось в /tmp\n"; ls -l /tmp/*.pem /tmp/*.key /tmp/*.crt 2>&1
+            t() { printf "\n===== %s\n" "$1"; shift; "$@" 2>&1 | head -30; printf "[код %s]\n" "${PIPESTATUS[0]}"; }
+            KEY="-algorithm bign-pubkey -pkeyopt params:bign-curve256v1"
+
+            t "хеши движка"  bash -c "openssl list -digest-algorithms | grep -iE \"belt|bash|bign\""
+
+            # Ключи: форма, которая в первом замере вернула 0
+            t "ключ УЦ"    openssl genpkey -engine bee2evp $KEY -out /tmp/ca.key
+            t "ключ листа" openssl genpkey -engine bee2evp $KEY -out /tmp/leaf.key
+            # ⚠ Содержимое ключей НЕ печатаем даже для одноразовых тестовых: репозиторий
+            # публичный, а привычка печатать ключ в лог переносится на непубличные.
+            t "ключ читается" bash -c "openssl pkey -engine bee2evp -in /tmp/ca.key -noout && echo читается"
+
+            # Самоподписанный УЦ — перебираем имена хеша, какое подойдёт
+            for md in belt-hash bign-with-hbelt sha256; do
+              t "УЦ, хеш $md" openssl req -engine bee2evp -x509 -new -key /tmp/ca.key \
+                -"$md" -days 2 -subj "/CN=btls-test-ca" -out "/tmp/ca-$md.crt"
+            done
+            printf "\n===== какие сертификаты УЦ получились\n"; ls -l /tmp/ca-*.crt 2>&1
+
+            CA=$(ls /tmp/ca-*.crt 2>/dev/null | head -1)
+            printf "\n===== берём УЦ: %s\n" "${CA:-НЕТ НИ ОДНОГО}"
+            [ -n "$CA" ] || exit 0
+            MD=$(basename "$CA" .crt); MD=${MD#ca-}
+
+            t "запрос листа" openssl req -engine bee2evp -new -key /tmp/leaf.key -"$MD" \
+              -subj "/CN=btls-probe-upstream" -out /tmp/leaf.csr
+            t "подпись листа" openssl x509 -req -in /tmp/leaf.csr -CA "$CA" -CAkey /tmp/ca.key \
+              -"$MD" -days 2 -CAcreateserial -out /tmp/leaf.crt \
+              -extfile <(printf "subjectAltName=DNS:btls-probe-upstream\n")
+            t "цепочка сходится" openssl verify -CAfile "$CA" /tmp/leaf.crt
+
+            [ -s /tmp/leaf.crt ] || { echo "листа нет — дальше смысла нет"; exit 0; }
+
+            # Живое рукопожатие BTLS с самим собой
+            openssl s_server -engine bee2evp -accept 4433 -cert /tmp/leaf.crt -key /tmp/leaf.key \
+              -cipher DHE-BIGN-WITH-BELT-CTR-MAC-HBELT -tls1_2 -www >/tmp/srv.log 2>&1 &
+            sleep 3
+            t "рукопожатие" bash -c "openssl s_client -engine bee2evp -connect 127.0.0.1:4433 \
+              -CAfile $CA -cipher DHE-BIGN-WITH-BELT-CTR-MAC-HBELT -tls1_2 \
+              -verify_return_error -verify_hostname btls-probe-upstream -brief </dev/null"
+            printf "\n===== лог сервера\n"; head -20 /tmp/srv.log
           ' || echo "[замер завершился ненулевым кодом — это тоже результат]"
 
       # Криптография СЧИТАЕТ ПРАВИЛЬНО — контрольные примеры СТБ 34.101.31/.45/.47/.77,
