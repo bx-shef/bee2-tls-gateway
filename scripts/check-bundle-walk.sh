@@ -116,10 +116,10 @@ else
   bad "звено выбрано по хешу, а не по имени файла" "посторонний '$other_cn' попал в связку — отбор идёт не по хешу"
 fi
 
-if grep -q 'цепочка замкнута' <<<"$out"; then
-  ok "замыкание цепочки названо в выводе"
+if grep -q 'ветвь замкнута на корне' <<<"$out"; then
+  ok "замыкание на самоподписанном корне названо в выводе"
 else
-  bad "замыкание цепочки названо в выводе" "нет строки про самоподписанный корень"
+  bad "замыкание на корне названо в выводе" "нет строки про самоподписанный корень"
 fi
 
 # --- 2. Незамкнутая цепочка краснеет и кодом, и текстом -----------------------------------
@@ -162,6 +162,69 @@ if grep -q 'РАЗНЫЕ сертификаты' <<<"$out3"; then
   ok "неоднозначность (один subject_hash, разные сертификаты) названа вслух"
 else
   bad "неоднозначность названа вслух" "скрипт выбрал молча"
+fi
+
+# --- 4. Один сертификат под ДВУМЯ именами — дедуп по отпечатку, без ложной тревоги --------
+# ⚠ Ровно случай ruc.cer / ruc2.cer у nces.by: побайтово один сертификат, опубликованный
+# дважды. Ревью показало, что без этой фикстуры снятие дедупа проходит незамеченным: связка
+# остаётся рабочей, но скрипт начинает кричать «РАЗНЫЕ сертификаты» на каждой легитимной
+# паре — и обесценивает то самое предупреждение, которому оператор обязан верить.
+CAND_TWIN="$WORK/candidates-twin"
+mkdir -p "$CAND_TWIN"
+cp "$CAND/m-root.pem" "$CAND_TWIN/"
+cp "$CAND/z-sub.pem" "$CAND_TWIN/z-sub.pem"
+cp "$CAND/z-sub.pem" "$CAND_TWIN/a-sub-copy.pem"   # тот же файл под «ранним» именем
+OUT4="$WORK/run4"
+out4="$(bash scripts/by-ca-bundle.sh --no-live --out "$OUT4" \
+  --candidates-dir "$CAND_TWIN" --issuer-hash "$leaf_issuer_hash" 2>&1)"
+rc4=$?
+if grep -q 'РАЗНЫЕ сертификаты' <<<"$out4"; then
+  bad "дубль под двумя именами не считается разными сертификатами" "ложная тревога: дедуп по отпечатку не сработал"
+else
+  ok "дубль под двумя именами схлопнут по отпечатку, ложной тревоги нет"
+fi
+twin_count="$(grep -c 'BEGIN CERTIFICATE' "$OUT4/gossuok-bundle.pem" 2>/dev/null || echo 0)"
+if [[ "$twin_count" -eq 2 ]]; then
+  ok "дубль попал в связку один раз (2 сертификата: промежуточный и корень)"
+else
+  bad "дубль попал в связку один раз" "в связке $twin_count сертификатов вместо 2"
+fi
+if [[ $rc4 -eq 0 ]]; then
+  ok "цепочка с дублем замкнута и вернула 0"
+else
+  bad "цепочка с дублем замкнута" "код возврата $rc4"
+fi
+
+# --- 5. Две ветви с РАЗНЫМИ корнями: замкнутой считается только полная цепочка -------------
+# ⚠ Самый дорогой случай, и прежняя редакция обхода его проваливала: два сертификата с одним
+# subject_hash, подписанные разными корнями, при том что в кандидатах есть корень только
+# одной ветви. Обход шёл по первой ветви, упирался в её корень и рапортовал «замкнута» с
+# кодом 0 — а связки для той ветви, что реально подписала лист, в ней не было. В бою это
+# `unable to get local issuer` и 502.
+CAND_FORK="$WORK/candidates-fork"
+mkdir -p "$CAND_FORK"
+openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj '/CN=Walk Test Root B' \
+  -keyout "$WORK/rootb.key" -out "$WORK/rootb.pem" 2>/dev/null
+openssl req -new -newkey rsa:2048 -nodes -subj "/CN=$sub_cn" \
+  -keyout "$WORK/subb.key" -out "$WORK/subb.csr" 2>/dev/null
+openssl x509 -req -in "$WORK/subb.csr" -CA "$WORK/rootb.pem" -CAkey "$WORK/rootb.key" \
+  -CAcreateserial -days 2 -extfile <(printf 'basicConstraints=CA:TRUE\n') \
+  -out "$CAND_FORK/z-sub-b.pem" 2>/dev/null
+cp "$CAND/z-sub.pem" "$CAND_FORK/a-sub-a.pem"   # ветвь A — её корень в кандидатах ЕСТЬ
+cp "$CAND/m-root.pem" "$CAND_FORK/m-root.pem"   # корень ветви B НЕ кладём
+OUT5="$WORK/run5"
+out5="$(bash scripts/by-ca-bundle.sh --no-live --out "$OUT5" \
+  --candidates-dir "$CAND_FORK" --issuer-hash "$leaf_issuer_hash" 2>&1)"
+rc5=$?
+if [[ $rc5 -eq 3 ]]; then
+  ok "ветвь без своего корня не считается замкнутой (код 3)"
+else
+  bad "ветвь без своего корня не считается замкнутой" "код возврата $rc5 — обход поверил первой ветви"
+fi
+if grep -q 'ветвь не закрыта' <<<"$out5"; then
+  ok "незакрытая ветвь названа вслух"
+else
+  bad "незакрытая ветвь названа вслух" "скрипт не сказал, какая ветвь оборвалась"
 fi
 
 echo
