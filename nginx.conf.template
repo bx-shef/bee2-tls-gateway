@@ -29,6 +29,19 @@ http {
                   'rt=$request_time urt=$upstream_response_time';
     access_log /dev/stdout gw;
 
+    # ⚠ ПРИЧИНЫ ОТКАЗА В ЭТОМ ЛОГЕ НЕТ, И ЭТО НЕ НЕДОСМОТР — ЭТО ИЗМЕРЕНО (#49).
+    # Задача просила различать «банк лежит» и «мы перестали доверять банку». Замер на
+    # живом nginx (job `image`, 14.08.2026) показал, что переменных для этого не
+    # существует: два сценария отказа дают ПОБАЙТОВО ОДИНАКОВЫЙ набор.
+    #
+    #   порт закрыт : status=502 ustatus=502 uconn=- ubs=0 ubr=0
+    #   TLS упал    : status=502 ustatus=502 uconn=- ubs=0 ubr=0
+    #
+    # В частности `$upstream_bytes_received` НЕ считает байты рукопожатия — он живёт на
+    # HTTP-уровне, до которого дело не доходит. Причина есть только в `error_log`, а там
+    # уровень `error` печатает строку запроса целиком. Как диагностировать отказ — команда
+    # в `docs/PROCESS.md` §4, и она сверяется смоуком.
+
     # A deliberately constant rate-limit key — see the zone below. `map` is the only way
     # nginx lets you hand a literal to `limit_req_zone`, which insists on a variable.
     map $host $gw_limit_key {
