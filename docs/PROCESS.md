@@ -470,8 +470,27 @@ allowlist: видно, какой эндпоинт отработал, без с
 docker exec <контейнер> /opt/btls/bin/openssl s_client \
   -connect apibel.priorbank.by:9345 -servername apibel.priorbank.by \
   -CAfile /etc/crypto-gw/ca/gossuok-bundle.pem \
-  -verify_return_error </dev/null
+  -verify_return_error -verify_hostname apibel.priorbank.by \
+  -tls1_2 -cipher DHE-BIGN-WITH-BELT-CTR-MAC-HBELT:DHE-BIGN-WITH-BELT-DWP-HBELT:DHT-BIGN-WITH-BELT-CTR-MAC-HBELT:DHT-BIGN-WITH-BELT-DWP-HBELT \
+  -brief </dev/null
 ```
+
+⚠ **Три флага здесь неочевидны, и без них команда врёт в утешительную сторону.**
+
+- **`-cipher` и `-tls1_2` повторяют ограничения шлюза** (`nginx.conf.template`,
+  `proxy_ssl_ciphers` и `proxy_ssl_protocols`). Без них `s_client` договорился бы обычным
+  TLS — тем самым, которым шлюз ходить не станет, — и оператор увидел бы «всё в порядке»
+  ровно в тот момент, когда платёжный путь не работает. Это не теоретический случай:
+  единственный живой замер вернулся с `DHT` вместо `DHE`.
+- **`-verify_hostname` повторяет `proxy_ssl_verify on` + `proxy_ssl_name`.** Без него
+  сертификат с верной цепочкой ГосСУОК, но на чужое имя прошёл бы проверку здесь и был бы
+  отвергнут шлюзом.
+- **`-brief` убирает из вывода `Master-Key` сессии, тикет и полный PEM сертификата.**
+  Диагностику копируют в тикеты и чаты; секрету рукопожатия там делать нечего. Строку
+  `Ciphersuite` он при этом оставляет — ради неё команда во многом и нужна.
+
+⚠ Если список шифронаборов в `nginx.conf.template` изменится, эту команду надо править
+вместе с ним: она повторяет его **копией**, а не ссылкой.
 
 Что читать в выводе:
 

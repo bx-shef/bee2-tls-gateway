@@ -341,8 +341,8 @@ jobs:
             f=${f//apibel.priorbank.by/$1}
             # Разбиение на слова здесь НАМЕРЕННОЕ — флаги приходят одной строкой.
             # shellcheck disable=SC2086
-            docker run --rm --entrypoint /opt/btls/bin/openssl bee2-tls-gateway:ci \
-              $f </dev/null 2>&1 || true
+            timeout 60s docker run --rm --entrypoint /opt/btls/bin/openssl \
+              bee2-tls-gateway:ci $f </dev/null 2>&1 || true
           }
 
           # Случай 1: на порту никого. Ожидаем отказ СОЕДИНЕНИЯ.
@@ -352,7 +352,8 @@ jobs:
             || { echo "FAIL: отказ соединения не опознан по выводу" >&2; exit 1; }
           echo 'ok: недоступный апстрим виден как отказ соединения'
 
-          # Случай 2: TLS отвечает, но доверия нет — самоподписанный сертификат.
+          # Случай 2: на порту обычный TLS-сервер. Команда теперь ограничена теми же
+          # наборами, что и шлюз, поэтому падает на согласовании — ровно как упал бы шлюз.
           openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
             -subj '/CN=diag-probe' -keyout /tmp/diag.key -out /tmp/diag.crt 2>/dev/null
           openssl s_server -quiet -accept 9346 \
@@ -365,14 +366,22 @@ jobs:
           printf '%s\n' "$out_tls" | tail -3
           # ⚠ Требуем ИМЕННО ошибку проверки, а не любой непустой вывод: недоступный порт
           # тоже даёт непустой вывод, и проверка «что-то напечаталось» прошла бы вхолостую.
-          grep -qi 'verify error\|unable to verify\|self.signed' <<<"$out_tls" \
-            || { echo "FAIL: недоверенный сертификат не опознан по выводу" >&2; exit 1; }
-          echo 'ok: недоверенный апстрим виден как ошибка проверки цепочки'
+          # ⚠ Паттерн широкий НАМЕРЕННО: точная формулировка зависит от того, где именно
+          # оборвалось рукопожатие (нет общего набора, alert от сервера, ошибка проверки).
+          # Узкий паттерн здесь давал бы красное на исправном коде при смене версии OpenSSL.
+          grep -qi 'handshake failure\|no ciphers\|no cipher match\|alert\|verify error\|verification error\|unable to verify\|self.signed' <<<"$out_tls" \
+            || { echo "FAIL: отказ на уровне TLS не опознан по выводу" >&2; exit 1; }
+          echo 'ok: отвечающий, но неподходящий апстрим виден как отказ TLS'
 
           # ⚠ И главное: два случая РАЗЛИЧАЮТСЯ. Без этой строки обе проверки выше могли
           # бы срабатывать на одном и том же тексте, и команда «различает» лишь на словах.
-          if grep -qi 'verify error\|unable to verify\|self.signed' <<<"$out_down"; then
-            echo "FAIL: вывод недоступного порта тоже похож на ошибку проверки" >&2
+          if grep -qi 'handshake failure\|no ciphers\|verify error\|verification error\|self.signed' <<<"$out_down"; then
+            echo "FAIL: вывод недоступного порта тоже похож на отказ TLS" >&2
+            exit 1
+          fi
+          # ⚠ И обратная сторона — иначе «различает» проверялось бы в одну сторону.
+          if grep -qi 'Connection refused\|errno=' <<<"$out_tls"; then
+            echo "FAIL: вывод отказа TLS тоже похож на отказ соединения" >&2
             exit 1
           fi
           echo 'ok: причины отказа в выводе различимы'
@@ -398,8 +407,8 @@ jobs:
           openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
             -subj '/CN=rotation-probe' -keyout /tmp/rot.key -out /tmp/rot.crt 2>/dev/null
           cat ca/gossuok-bundle.pem /tmp/rot.crt > /tmp/rot-bundle.pem
-          before=$(grep -c 'BEGIN CERTIFICATE' ca/gossuok-bundle.pem)
-          after=$(grep -c 'BEGIN CERTIFICATE' /tmp/rot-bundle.pem)
+          before=$(grep -c 'BEGIN CERTIFICATE' ca/gossuok-bundle.pem || true)
+          after=$(grep -c 'BEGIN CERTIFICATE' /tmp/rot-bundle.pem || true)
           echo "корней в связке: было $before, стало $after"
           test "$after" -eq "$((before + 1))"
 
@@ -413,6 +422,9 @@ jobs:
           done
           rot_log=$(docker logs gw-rot 2>&1)
           printf '%s\n' "$rot_log"
+          # ⚠ Обе строки ниже печатаются ДО `nginx -t`, поэтому без этой проверки шаг
+          # прошёл бы и на контейнере, который не поднялся по другой причине.
+          test "$(docker inspect -f '{{.State.Health.Status}}' gw-rot)" = healthy
           docker rm -f gw-rot >/dev/null
 
           # Том действительно подменён — иначе шаг проверял бы штатную связку и проходил
