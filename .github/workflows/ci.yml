@@ -319,14 +319,30 @@ jobs:
       - name: Команда диагностики различает причины отказа
         run: |
           set -euo pipefail
-          # ⚠ Флаги openssl — ровно те, что в PROCESS.md §4 (обвязка отличается: там `docker exec`
-          # по живому контейнеру, здесь одноразовый `docker run`). Расхождение ФЛАГОВ —
-          # дефект документации: оператор запустит не то, что проверено.
+          # ⚠ Флаги НЕ переписаны сюда руками — они ИЗВЛЕКАЮТСЯ из `docs/PROCESS.md` §4.
+          # Рукописная копия сторожила бы саму себя: поправь кто-нибудь путь к связке в
+          # документе, и CI остался бы зелёным, а оператор запустил бы неработающее.
+          # Теперь исполняется ровно то, что напечатано оператору; расходиться нечему.
+          flags=$(python3 - <<'PY'
+          import re, sys
+          t = open("docs/PROCESS.md", encoding="utf-8").read()
+          m = re.search(r"```bash\n(docker exec[^`]*?s_client.*?)\n```", t, re.S)
+          if not m:
+              sys.exit("не нашёл блок с командой диагностики в PROCESS.md §4")
+          cmd = " ".join(m.group(1).replace("\\\n", " ").split())
+          tail = cmd.split("/opt/btls/bin/openssl", 1)[1]
+          print(tail.replace("</dev/null", "").strip())
+          PY
+          )
+          echo "флаги из документа: $flags"
+
           diag() {  # diag <хост> <порт>
+            local f=${flags//apibel.priorbank.by:9345/$1:$2}
+            f=${f//apibel.priorbank.by/$1}
+            # Разбиение на слова здесь НАМЕРЕННОЕ — флаги приходят одной строкой.
+            # shellcheck disable=SC2086
             docker run --rm --entrypoint /opt/btls/bin/openssl bee2-tls-gateway:ci \
-              s_client -connect "$1:$2" -servername "$1" \
-              -CAfile /etc/crypto-gw/ca/gossuok-bundle.pem \
-              -verify_return_error </dev/null 2>&1 || true
+              $f </dev/null 2>&1 || true
           }
 
           # Случай 1: на порту никого. Ожидаем отказ СОЕДИНЕНИЯ.
@@ -406,6 +422,31 @@ jobs:
           grep -q 'проверка цепочки: bundle подтверждает эталонный сертификат банка — OK' <<<"$rot_log" \
             || { echo "FAIL: лишний корень сломал проверку цепочки" >&2; exit 1; }
           echo 'ok: связка из трёх сертификатов подтверждает эталон банка'
+
+          # ⚠ ОТРИЦАТЕЛЬНЫЙ СЛУЧАЙ, и без него всё выше не стоит ничего. Проверка,
+          # у которой нет сценария ПРОВАЛА, не отличает честный «— OK» от зашитого:
+          # замени кто-нибудь `openssl verify` на безусловный `log '… — OK'`, и шаг выше
+          # остался бы зелёным. Здесь связка заведомо негодная — только посторонний
+          # сертификат, без настоящих корней ГосСУОК, — и мы требуем ветку ВНИМАНИЕ.
+          docker run -d --name gw-rot-bad -p 127.0.0.1:1093:1080 \
+            -e GW_UPSTREAM_HOST=127.0.0.1 -e GW_UPSTREAM_PORT=9345 \
+            -v /tmp/rot.crt:/etc/crypto-gw/ca/gossuok-bundle.pem:ro \
+            bee2-tls-gateway:ci
+          for _ in $(seq 1 20); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' gw-rot-bad)" = healthy ] && break
+            sleep 2
+          done
+          bad_log=$(docker logs gw-rot-bad 2>&1)
+          printf '%s\n' "$bad_log"
+          docker rm -f gw-rot-bad >/dev/null
+
+          grep -q 'НЕ подтверждает эталонный сертификат банка' <<<"$bad_log" \
+            || { echo "FAIL: негодная связка не вызвала предупреждения" >&2; exit 1; }
+          if grep -q 'проверка цепочки: bundle подтверждает эталонный сертификат банка — OK' <<<"$bad_log"; then
+            echo "FAIL: негодная связка дала «— OK» — проверка цепочки не исполняется" >&2
+            exit 1
+          fi
+          echo 'ok: негодная связка краснеет — значит «— OK» выше настоящий'
 
       # Криптография СЧИТАЕТ ПРАВИЛЬНО — контрольные примеры СТБ 34.101.31/.45/.47/.77,
       # самотест ДСЧ, здоровье источников энтропии, обязательный криптонабор
