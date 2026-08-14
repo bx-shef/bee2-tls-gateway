@@ -5,7 +5,7 @@
 #
 # ⚠ Everything here is a CLIENT-side TLS config (`proxy_ssl_*`). The gateway terminates
 # NO TLS of its own: it must never be published to the host, only attached to an
-# internal compose network. See README.md § "Граница доверия".
+# internal compose network. See README.md § "Граница безопасности".
 
 worker_processes 1;
 daemon off;
