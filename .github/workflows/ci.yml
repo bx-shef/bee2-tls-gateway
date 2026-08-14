@@ -563,7 +563,14 @@ jobs:
           # ⚠ Имя апстрима в сети = SAN листа: `proxy_ssl_verify on` сверяет ИМЯ, а не
           # только цепочку. Один апстрим обслуживает оба случая — вторая его копия
           # означала бы две команды `s_server`, которые обязаны меняться синхронно.
+          # ⚠ `--user` здесь обязателен и стоил одного красного прогона. Фикстура пишет
+          # ключи от uid раннера и закрывает их `chmod 600`; апстрим по умолчанию работает
+          # под `gw` (uid 10001) и свой же ключ прочитать не может —
+          # `Permission denied` на старте s_server. Ослаблять права ключа вместо этого
+          # нельзя: `chmod 600` там не украшение, а условие, при котором отрицательный
+          # случай невозможно позеленить подменой ca.crt.
           docker run -d --name btls-upstream --network btlsnet \
+            --user "$(id -u):$(id -g)" \
             --network-alias btls-probe-upstream -v "$PKI:/pki:ro" \
             --entrypoint /opt/btls/bin/openssl bee2-tls-gateway:ci \
             s_server -accept 9345 -cert /pki/leaf.crt -key /pki/leaf.key \
