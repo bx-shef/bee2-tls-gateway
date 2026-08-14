@@ -28,11 +28,33 @@ set -euo pipefail
 
 OUT="${1:?куда класть PKI (каталог)}"
 HOST="${2:-btls-probe-upstream}"
+# CN УЦ выводится из имени листа: две фикстуры в одном прогоне обязаны быть различимы
+# по subject, иначе «два якоря» на глаз читались бы как один и тот же.
+CA_CN="btls-test-ca-$HOST"
 
-# Наш openssl, а не первый по PATH: стоковый не читает ключи bign В ПРИНЦИПЕ, и подмена
-# PATH превратила бы эту проверку в проверку неизвестно чего.
-OPENSSL_BIN="${GW_OPENSSL:-/opt/btls/bin/openssl}"
+# Наш openssl, ЖЁСТКИМ путём и без переменной-переключателя. Стоковый не читает ключи
+# bign в принципе, поэтому подмена превратила бы проверку в проверку неизвестно чего.
+# ⚠ Переменная вида GW_OPENSSL здесь была и убрана осознанно: это не выключатель, а
+# способ ПОДДЕЛАТЬ УСПЕХ. Обёртка, зовущая стоковый openssl, выпустила бы RSA-PKI,
+# гейт `verify` ниже прошёл бы, nginx договорился бы с не-BTLS сервером — и утверждение
+# «шлюз говорит на обязательном криптонаборе» исчезло бы при зелёном CI. Тем же местом
+# и по той же причине из entrypoint.sh убран GW_BEE2CMD.
+OPENSSL_BIN=/opt/btls/bin/openssl
 [ -x "$OPENSSL_BIN" ] || { echo "нет патченного openssl: $OPENSSL_BIN" >&2; exit 1; }
+
+# Причина отказа обязана называть себя — это цель 2 проекта, и глушить stderr у openssl
+# значит нарушать её ровно там, где сломается труднее всего: формы команд ниже найдены
+# замером и завязаны на версию движка. Без этой обёртки поломка даёт `exit 1` без слов.
+# ⚠ stderr этих команд несёт диагностику, а не байты ключа: ни у одной нет `-text`,
+# и добавлять его сюда нельзя — репозиторий публичный, вывод CI тоже.
+run_ssl() {
+  local what="$1"; shift
+  local err
+  if ! err=$("$OPENSSL_BIN" "$@" 2>&1 >/dev/null); then
+    printf 'FAIL: %s\n%s\n' "$what" "$err" >&2
+    exit 1
+  fi
+}
 
 # Единственная форма genpkey, которая работает. Замерено: без `-pkeyopt params:` движок
 # отвечает `Error generating bign-pubkey key`, а `req -newkey bign-curve256v1` не знает
@@ -44,28 +66,27 @@ MD=belt-hash
 
 mkdir -p "$OUT"
 
-"$OPENSSL_BIN" genpkey -engine bee2evp "${KEYSPEC[@]}" -out "$OUT/ca.key" 2>/dev/null
-"$OPENSSL_BIN" genpkey -engine bee2evp "${KEYSPEC[@]}" -out "$OUT/leaf.key" 2>/dev/null
+run_ssl "ключ УЦ" genpkey -engine bee2evp "${KEYSPEC[@]}" -out "$OUT/ca.key"
+run_ssl "ключ листа" genpkey -engine bee2evp "${KEYSPEC[@]}" -out "$OUT/leaf.key"
 
-"$OPENSSL_BIN" req -engine bee2evp -x509 -new -key "$OUT/ca.key" -"$MD" \
-  -days 2 -subj '/CN=btls-test-ca' -out "$OUT/ca.crt" 2>/dev/null
+run_ssl "самоподписанный УЦ" req -engine bee2evp -x509 -new -key "$OUT/ca.key" -"$MD" \
+  -days 2 -subj "/CN=$CA_CN" -out "$OUT/ca.crt"
 
-"$OPENSSL_BIN" req -engine bee2evp -new -key "$OUT/leaf.key" -"$MD" \
-  -subj "/CN=$HOST" -out "$OUT/leaf.csr" 2>/dev/null
+run_ssl "запрос на лист" req -engine bee2evp -new -key "$OUT/leaf.key" -"$MD" \
+  -subj "/CN=$HOST" -out "$OUT/leaf.csr"
 
 # SAN обязателен: `proxy_ssl_verify on` проверяет ИМЯ, а не только цепочку, и по одному
 # лишь CN современный OpenSSL имя не сверяет.
-"$OPENSSL_BIN" x509 -req -in "$OUT/leaf.csr" -CA "$OUT/ca.crt" -CAkey "$OUT/ca.key" \
+run_ssl "подпись листа" x509 -req -in "$OUT/leaf.csr" -CA "$OUT/ca.crt" -CAkey "$OUT/ca.key" \
   -"$MD" -days 2 -CAcreateserial -out "$OUT/leaf.crt" \
-  -extfile <(printf 'subjectAltName=DNS:%s\n' "$HOST") 2>/dev/null
+  -extfile <(printf 'subjectAltName=DNS:%s\n' "$HOST")
 
 # Гейт: собранная цепочка обязана сходиться ЗДЕСЬ. Иначе проверка ниже по течению
 # покраснела бы на рукопожатии, и разбирались бы с nginx вместо разбирательства с PKI.
-"$OPENSSL_BIN" verify -CAfile "$OUT/ca.crt" "$OUT/leaf.crt" >/dev/null \
-  || { echo 'FAIL: выпущенная цепочка не сходится сама с собой' >&2; exit 1; }
+run_ssl "цепочка сходится сама с собой" verify -CAfile "$OUT/ca.crt" "$OUT/leaf.crt"
 
 # Ключи не должны быть видны никому, кроме владельца, даже одноразовые.
 chmod 600 "$OUT/ca.key" "$OUT/leaf.key"
 chmod 644 "$OUT/ca.crt" "$OUT/leaf.crt"
 
-echo "BTLS-фикстура готова в $OUT: УЦ btls-test-ca, лист $HOST, подпись $MD"
+echo "BTLS-фикстура готова в $OUT: УЦ $CA_CN, лист $HOST, подпись $MD"

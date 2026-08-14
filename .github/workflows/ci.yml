@@ -472,12 +472,6 @@ jobs:
           fi
           echo 'ok: негодная связка краснеет — значит «— OK» выше настоящий'
 
-      # ⚠ ВРЕМЕННЫЙ ЗАМЕР (#58), откатывается следующим коммитом. Вопрос один: можно ли
-      # поднять BTLS-сервер СВОИМИ силами, без банка. Если да — второй код-путь проверки
-      # цепочки (`proxy_ssl_trusted_certificate` внутри nginx, через него идёт 100%
-      # боевого трафика) закрывается офлайн, и владельцу остаётся только настоящий корень
-      # ГосСУОК. Если нет — это записывается как барьер, а не как «не успели».
-      # Шаг НЕ краснеет: он измеряет, а не утверждает.
       # ⚠ ВТОРАЯ проверка цепочки — та, через которую идёт весь боевой трафик (#58).
       # Шаг выше проверяет `openssl verify` при старте: утилита, отдельный процесс,
       # предупреждающий гейт. Здесь проверяется `proxy_ssl_trusted_certificate` ВНУТРИ
@@ -489,94 +483,141 @@ jobs:
       # мы поднимаем СВОЙ, из того же образа: замерено 14.08.2026, что наш стек умеет
       # выпускать bign-сертификаты и говорить с собой на обязательном криптонаборе.
       #
+      # ⚠ Оба якоря в связке — bign, и это НЕ придирка. Настоящая ротация кладёт рядом со
+      # старым корнем ГосСУОК новый, тоже bign, а ключи bign стоковый OpenSSL не читает в
+      # принципе. Возьми мы вторым якорем RSA-корень — хранилище разбирало бы его
+      # встроенным кодом, и «второй bign-якорь ломает store» прошло бы проверку зелёным,
+      # чтобы вылезти в день настоящего перевыпуска. Ровно тот отказ, ради которого всё.
+      #
       # ⚠ Что это доказывает: лишний якорь доверия не мешает nginx проверить цепочку и
-      # договориться. Чего НЕ доказывает: что подойдёт настоящий новый корень ГосСУОК и
-      # что с двойной связкой договорится настоящий банк. Это ручной прогон владельца,
+      # договориться. Чего НЕ доказывает: что подойдёт настоящий корень ГосСУОК и что с
+      # двойной связкой договорится настоящий банк. Это ручной прогон владельца,
       # docs/PROCESS.md §4 — и он остаётся обязательным.
       - name: Ротация — двойную связку переживает и рукопожатие nginx, не только старт
         run: |
           set -euo pipefail
           PKI=/tmp/btls-pki
-          rm -rf "$PKI"; mkdir -p "$PKI"
-          # Контейнер работает под uid 10001 (gw), каталог создан runner'ом — без этого
-          # фикстура не запишется, и шаг упал бы на правах, а не на сути.
-          chmod 777 "$PKI"
-          docker run --rm -v "$PKI:/pki" -v "$PWD/scripts:/scripts:ro" \
-            --entrypoint bash bee2-tls-gateway:ci \
-            /scripts/make-btls-fixture.sh /pki btls-probe-upstream
+          rm -rf "$PKI"; mkdir -p "$PKI"; chmod 700 "$PKI"
 
-          # Связка из ДВУХ якорей: наш тестовый УЦ + посторонний корень. Ровно та форма,
-          # в которой живёт связка во время ротации — старый рядом с новым.
-          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
-            -subj '/CN=rotation-probe-2' -keyout "$PKI/extra.key" -out "$PKI/extra.crt" 2>/dev/null
-          cat "$PKI/ca.crt" "$PKI/extra.crt" > "$PKI/bundle-two.pem"
-          test "$(grep -c 'BEGIN CERTIFICATE' "$PKI/bundle-two.pem")" -eq 2
+          # ⚠ Уборка через trap, а не строкой в конце. Без неё падение ЛЮБОГО assert'а
+          # оставляет сеть `btlsnet` и контейнеры: на эфемерном раннере это сходит с рук,
+          # на self-hosted следующий прогон умрёт на `network already exists` — красным,
+          # который не имеет отношения к делу и маскирует настоящий результат.
+          cleanup() {
+            docker rm -f btls-upstream gw-live gw-live-bad >/dev/null 2>&1 || true
+            docker network rm btlsnet >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          # ⚠ `timeout` обязателен по той же причине, что и у шагов выше: без него ошибка
+          # в самом тесте даёт не отказ, а зависание до таймаута job'а — двадцать минут
+          # вместо внятной строки. `genpkey` тянет из ДСЧ, а он на чужом хосте может и не
+          # набрать энтропии (entrypoint.sh §0 про это предупреждает отдельно).
+          #
+          # ⚠ `--user` вместо `chmod 777` на каталог с ключами. Право записи в каталог, а
+          # не владение файлом, решает, можно ли подменить файл; открытый каталог отменял
+          # бы `chmod 600`, который фикстура ставит на ключи, — и подмена ca.crt между
+          # выпуском и рукопожатием как раз зеленит отрицательный случай.
+          fixture() {
+            timeout 120s docker run --rm --user "$(id -u):$(id -g)" \
+              -v "$PKI:/pki" -v "$PWD/scripts:/scripts:ro" \
+              --entrypoint bash bee2-tls-gateway:ci \
+              /scripts/make-btls-fixture.sh "$1" "$2"
+          }
+          fixture /pki        btls-probe-upstream
+          fixture /pki/second btls-probe-other
+
+          # Связка из ДВУХ якорей, оба bign: наш УЦ (он подписал лист апстрима) и второй,
+          # посторонний. Ровно та форма, в которой связка живёт во время ротации.
+          cat "$PKI/ca.crt" "$PKI/second/ca.crt" > "$PKI/bundle-two.pem"
+          want=$(grep -c 'BEGIN CERTIFICATE' "$PKI/bundle-two.pem")
+          test "$want" -eq 2
+          echo "якорей в связке: $want"
+
+          # Ждём, пока апстрим реально СЛУШАЕТ, а не «прошло три секунды». Фиксированная
+          # пауза на загруженном раннере проигрывает гонку, и шаг краснеет по причине,
+          # не имеющей отношения к проверяемому.
+          wait_listen() {
+            for _ in $(seq 1 30); do
+              docker exec "$1" bash -c "</dev/tcp/127.0.0.1/9345" 2>/dev/null && return 0
+              sleep 1
+            done
+            echo "FAIL: апстрим $1 не слушает 9345" >&2
+            docker logs "$1" 2>&1 | tail -20 >&2
+            exit 1
+          }
+          # ⚠ Цикл ожидания ОБЯЗАН кончаться проверкой, а не истечением. Без неё
+          # не поднявшийся контейнер выглядит как провалившееся рукопожатие: шаг красный,
+          # но показывает пальцем на TLS, которого не было.
+          wait_healthy() {
+            for _ in $(seq 1 20); do
+              [ "$(docker inspect -f '{{.State.Health.Status}}' "$1")" = healthy ] && return 0
+              sleep 2
+            done
+            echo "FAIL: контейнер $1 не стал healthy" >&2
+            docker logs "$1" 2>&1 | tail -30 >&2
+            exit 1
+          }
 
           docker network create btlsnet >/dev/null
+          # ⚠ Имя апстрима в сети = SAN листа: `proxy_ssl_verify on` сверяет ИМЯ, а не
+          # только цепочку. Один апстрим обслуживает оба случая — вторая его копия
+          # означала бы две команды `s_server`, которые обязаны меняться синхронно.
           docker run -d --name btls-upstream --network btlsnet \
             --network-alias btls-probe-upstream -v "$PKI:/pki:ro" \
             --entrypoint /opt/btls/bin/openssl bee2-tls-gateway:ci \
             s_server -accept 9345 -cert /pki/leaf.crt -key /pki/leaf.key \
             -cipher DHE-BIGN-WITH-BELT-CTR-MAC-HBELT -tls1_2 -www >/dev/null
-          sleep 3
+          wait_listen btls-upstream
 
-          # ⚠ Имя апстрима = SAN листа: `proxy_ssl_verify on` сверяет ИМЯ, а не только
-          # цепочку, и docker DNS даёт это имя по имени контейнера.
           docker run -d --name gw-live --network btlsnet -p 127.0.0.1:1094:1080 \
             -e GW_UPSTREAM_HOST=btls-probe-upstream -e GW_UPSTREAM_PORT=9345 \
             -v "$PKI/bundle-two.pem:/etc/crypto-gw/ca/gossuok-bundle.pem:ro" \
             bee2-tls-gateway:ci >/dev/null
-          for _ in $(seq 1 20); do
-            [ "$(docker inspect -f '{{.State.Health.Status}}' gw-live)" = healthy ] && break
-            sleep 2
-          done
-          code=$(curl -s -o /dev/null -w '%{http_code}' \
+          wait_healthy gw-live
+          code=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' \
             http://127.0.0.1:1094/open-banking/v1.0/ping || true)
           gw_log=$(docker logs gw-live 2>&1)
           printf '%s\n' "$gw_log"
           echo "код ответа через шлюз: $code"
-          docker rm -f gw-live btls-upstream >/dev/null
+          docker rm -f gw-live >/dev/null
 
+          # Том действительно подменён. Без этой строки монтирование могло промахнуться,
+          # шлюз взял бы вшитую в образ связку ГосСУОК — и шаг проверял бы не то.
+          grep -q "корни ГосСУОК: $want сертификат(ов)" <<<"$gw_log" \
+            || { echo "FAIL: шлюз видит не подменённую связку" >&2; exit 1; }
           test "$code" = 200 \
             || { echo "FAIL: рукопожатие через связку из двух якорей не прошло (код $code)" >&2; exit 1; }
           echo 'ok: nginx договорился с BTLS-апстримом по связке из двух якорей'
 
-          # ⚠ ОТРИЦАТЕЛЬНЫЙ СЛУЧАЙ. Без него `200` выше не отличает работающую проверку
-          # от выключенной: сними кто-нибудь `proxy_ssl_verify on` — и шаг остался бы
-          # зелёным, потому что рукопожатие прошло бы вообще без якорей. Здесь в связке
-          # ТОЛЬКО посторонний корень: нужного якоря нет, доверять нечему.
-          docker run -d --name btls-upstream2 --network btlsnet \
-            --network-alias btls-probe-upstream -v "$PKI:/pki:ro" \
-            --entrypoint /opt/btls/bin/openssl bee2-tls-gateway:ci \
-            s_server -accept 9345 -cert /pki/leaf.crt -key /pki/leaf.key \
-            -cipher DHE-BIGN-WITH-BELT-CTR-MAC-HBELT -tls1_2 -www >/dev/null
-          sleep 3
+          # ⚠ ОТРИЦАТЕЛЬНЫЙ СЛУЧАЙ, и он несущий: без него `200` выше не отличает
+          # работающую проверку от снятой — сними кто-нибудь `proxy_ssl_verify on`, и
+          # рукопожатие прошло бы вообще без якорей, а шаг остался бы зелёным.
+          # Связка здесь — ТОЛЬКО посторонний якорь: доверять лист нечем.
+          #
+          # ⚠ И `502` сам по себе ничего не значит: его даёт и лежащий апстрим, и
+          # непримонтированный том. Поэтому ниже требуется, чтобы апстрим был жив, шлюз
+          # был healthy, а связка — именно подменённой. Иначе «проверка цепочки работает»
+          # доказывалось бы тем, что что-то другое сломалось.
           docker run -d --name gw-live-bad --network btlsnet -p 127.0.0.1:1095:1080 \
             -e GW_UPSTREAM_HOST=btls-probe-upstream -e GW_UPSTREAM_PORT=9345 \
-            -v "$PKI/extra.crt:/etc/crypto-gw/ca/gossuok-bundle.pem:ro" \
+            -v "$PKI/second/ca.crt:/etc/crypto-gw/ca/gossuok-bundle.pem:ro" \
             bee2-tls-gateway:ci >/dev/null
-          for _ in $(seq 1 20); do
-            [ "$(docker inspect -f '{{.State.Health.Status}}' gw-live-bad)" = healthy ] && break
-            sleep 2
-          done
-          bad_code=$(curl -s -o /dev/null -w '%{http_code}' \
+          wait_healthy gw-live-bad
+          wait_listen btls-upstream
+          bad_code=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' \
             http://127.0.0.1:1095/open-banking/v1.0/ping || true)
+          bad_log=$(docker logs gw-live-bad 2>&1)
+          printf '%s\n' "$bad_log"
           echo "код ответа через связку без нужного якоря: $bad_code"
-          docker rm -f gw-live-bad btls-upstream2 >/dev/null
-          docker network rm btlsnet >/dev/null
+          docker rm -f gw-live-bad >/dev/null
 
+          grep -q 'корни ГосСУОК: 1 сертификат(ов)' <<<"$bad_log" \
+            || { echo "FAIL: отрицательный случай видит не ту связку" >&2; exit 1; }
           test "$bad_code" = 502 \
             || { echo "FAIL: связка без нужного якоря дала $bad_code — проверка не работает" >&2; exit 1; }
           echo 'ok: без нужного якоря шлюз отказывает — значит 200 выше настоящий'
 
-      # Криптография СЧИТАЕТ ПРАВИЛЬНО — контрольные примеры СТБ 34.101.31/.45/.47/.77,
-      # самотест ДСЧ, здоровье источников энтропии, обязательный криптонабор
-      # МИ.10165.10.01 п. 4. До #19 это гонялось ТОЛЬКО ВРУЧНУЮ, то есть рано или поздно
-      # не гонялось бы вовсе: проверка, которую надо не забыть запустить, забывается.
-      # ⚠ Скрипт МОНТИРУЕТСЯ, а не копируется в образ: он инструмент проекта, а не часть
-      # шлюза, и объект испытаний растить им незачем. В образе живёт только bee2cmd, и
-      # живёт как документированная возможность (самотест при старте), а не как утилита.
-      # Пункт 5 (сверка belt-хэша с эталоном ОАЦ) требует сети и остаётся ручным — он
       # честно пропускается, а не притворяется пройденным.
       - name: Криптостек считает правильно (контрольные примеры СТБ)
         run: |
