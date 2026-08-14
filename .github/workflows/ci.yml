@@ -472,6 +472,32 @@ jobs:
           fi
           echo 'ok: негодная связка краснеет — значит «— OK» выше настоящий'
 
+      # ⚠ ВРЕМЕННЫЙ ЗАМЕР (#58), откатывается следующим коммитом. Вопрос один: можно ли
+      # поднять BTLS-сервер СВОИМИ силами, без банка. Если да — второй код-путь проверки
+      # цепочки (`proxy_ssl_trusted_certificate` внутри nginx, через него идёт 100%
+      # боевого трафика) закрывается офлайн, и владельцу остаётся только настоящий корень
+      # ГосСУОК. Если нет — это записывается как барьер, а не как «не успели».
+      # Шаг НЕ краснеет: он измеряет, а не утверждает.
+      - name: ЗАМЕР — чем наш стек умеет выпускать bign-ключи и сертификаты
+        run: |
+          set -uo pipefail
+          docker run --rm --entrypoint bash bee2-tls-gateway:ci -c '
+            t() { printf "\n===== %s\n" "$1"; shift; "$@" 2>&1 | head -25; printf "[код %s]\n" "${PIPESTATUS[0]}"; }
+            t "версия"            openssl version
+            t "движок"            openssl engine -t bee2evp
+            t "алгоритмы ключей"  openssl list -public-key-algorithms
+            t "bee2cmd: команды"  bee2cmd
+            t "bee2cmd: kg"       bee2cmd kg
+            t "genpkey bign-pubkey" openssl genpkey -engine bee2evp -algorithm bign-pubkey -out /tmp/k1.pem
+            t "genpkey bign"      openssl genpkey -engine bee2evp -algorithm bign -out /tmp/k2.pem
+            t "genpkey + params"  openssl genpkey -engine bee2evp -algorithm bign-pubkey \
+                                    -pkeyopt params:bign-curve256v1 -out /tmp/k3.pem
+            t "req -newkey bign"  openssl req -engine bee2evp -x509 -nodes -days 1 \
+                                    -subj /CN=btls-probe -newkey bign-curve256v1 \
+                                    -keyout /tmp/ca.key -out /tmp/ca.crt
+            printf "\n===== что получилось в /tmp\n"; ls -l /tmp/*.pem /tmp/*.key /tmp/*.crt 2>&1
+          ' || echo "[замер завершился ненулевым кодом — это тоже результат]"
+
       # Криптография СЧИТАЕТ ПРАВИЛЬНО — контрольные примеры СТБ 34.101.31/.45/.47/.77,
       # самотест ДСЧ, здоровье источников энтропии, обязательный криптонабор
       # МИ.10165.10.01 п. 4. До #19 это гонялось ТОЛЬКО ВРУЧНУЮ, то есть рано или поздно
