@@ -478,52 +478,94 @@ jobs:
       # боевого трафика) закрывается офлайн, и владельцу остаётся только настоящий корень
       # ГосСУОК. Если нет — это записывается как барьер, а не как «не успели».
       # Шаг НЕ краснеет: он измеряет, а не утверждает.
-      - name: ЗАМЕР — свой BTLS-сервер из своего же стека
+      # ⚠ ВТОРАЯ проверка цепочки — та, через которую идёт весь боевой трафик (#58).
+      # Шаг выше проверяет `openssl verify` при старте: утилита, отдельный процесс,
+      # предупреждающий гейт. Здесь проверяется `proxy_ssl_trusted_certificate` ВНУТРИ
+      # nginx — другая реализация, другой X509_STORE, другой момент жизни процесса. Из
+      # того, что двойную связку пережил `openssl verify`, не следует, что её переживёт
+      # рукопожатие, и до этого шага вторую половину не проверяло ничто.
+      #
+      # Живой банк тут недостижим (порт 9345 из GitHub Actions закрыт), поэтому апстрим
+      # мы поднимаем СВОЙ, из того же образа: замерено 14.08.2026, что наш стек умеет
+      # выпускать bign-сертификаты и говорить с собой на обязательном криптонаборе.
+      #
+      # ⚠ Что это доказывает: лишний якорь доверия не мешает nginx проверить цепочку и
+      # договориться. Чего НЕ доказывает: что подойдёт настоящий новый корень ГосСУОК и
+      # что с двойной связкой договорится настоящий банк. Это ручной прогон владельца,
+      # docs/PROCESS.md §4 — и он остаётся обязательным.
+      - name: Ротация — двойную связку переживает и рукопожатие nginx, не только старт
         run: |
-          set -uo pipefail
-          docker run --rm --entrypoint bash bee2-tls-gateway:ci -c '
-            t() { printf "\n===== %s\n" "$1"; shift; "$@" 2>&1 | head -30; printf "[код %s]\n" "${PIPESTATUS[0]}"; }
-            KEY="-algorithm bign-pubkey -pkeyopt params:bign-curve256v1"
+          set -euo pipefail
+          PKI=/tmp/btls-pki
+          rm -rf "$PKI"; mkdir -p "$PKI"
+          # Контейнер работает под uid 10001 (gw), каталог создан runner'ом — без этого
+          # фикстура не запишется, и шаг упал бы на правах, а не на сути.
+          chmod 777 "$PKI"
+          docker run --rm -v "$PKI:/pki" -v "$PWD/scripts:/scripts:ro" \
+            --entrypoint bash bee2-tls-gateway:ci \
+            /scripts/make-btls-fixture.sh /pki btls-probe-upstream
 
-            t "хеши движка"  bash -c "openssl list -digest-algorithms | grep -iE \"belt|bash|bign\""
+          # Связка из ДВУХ якорей: наш тестовый УЦ + посторонний корень. Ровно та форма,
+          # в которой живёт связка во время ротации — старый рядом с новым.
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -subj '/CN=rotation-probe-2' -keyout "$PKI/extra.key" -out "$PKI/extra.crt" 2>/dev/null
+          cat "$PKI/ca.crt" "$PKI/extra.crt" > "$PKI/bundle-two.pem"
+          test "$(grep -c 'BEGIN CERTIFICATE' "$PKI/bundle-two.pem")" -eq 2
 
-            # Ключи: форма, которая в первом замере вернула 0
-            t "ключ УЦ"    openssl genpkey -engine bee2evp $KEY -out /tmp/ca.key
-            t "ключ листа" openssl genpkey -engine bee2evp $KEY -out /tmp/leaf.key
-            # ⚠ Содержимое ключей НЕ печатаем даже для одноразовых тестовых: репозиторий
-            # публичный, а привычка печатать ключ в лог переносится на непубличные.
-            t "ключ читается" bash -c "openssl pkey -engine bee2evp -in /tmp/ca.key -noout && echo читается"
+          docker network create btlsnet >/dev/null
+          docker run -d --name btls-upstream --network btlsnet -v "$PKI:/pki:ro" \
+            --entrypoint /opt/btls/bin/openssl bee2-tls-gateway:ci \
+            s_server -accept 9345 -cert /pki/leaf.crt -key /pki/leaf.key \
+            -cipher DHE-BIGN-WITH-BELT-CTR-MAC-HBELT -tls1_2 -www >/dev/null
+          sleep 3
 
-            # Самоподписанный УЦ — перебираем имена хеша, какое подойдёт
-            for md in belt-hash bign-with-hbelt sha256; do
-              t "УЦ, хеш $md" openssl req -engine bee2evp -x509 -new -key /tmp/ca.key \
-                -"$md" -days 2 -subj "/CN=btls-test-ca" -out "/tmp/ca-$md.crt"
-            done
-            printf "\n===== какие сертификаты УЦ получились\n"; ls -l /tmp/ca-*.crt 2>&1
+          # ⚠ Имя апстрима = SAN листа: `proxy_ssl_verify on` сверяет ИМЯ, а не только
+          # цепочку, и docker DNS даёт это имя по имени контейнера.
+          docker run -d --name gw-live --network btlsnet -p 127.0.0.1:1094:1080 \
+            -e GW_UPSTREAM_HOST=btls-probe-upstream -e GW_UPSTREAM_PORT=9345 \
+            -v "$PKI/bundle-two.pem:/etc/crypto-gw/ca/gossuok-bundle.pem:ro" \
+            bee2-tls-gateway:ci >/dev/null
+          for _ in $(seq 1 20); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' gw-live)" = healthy ] && break
+            sleep 2
+          done
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            http://127.0.0.1:1094/open-banking/v1.0/ping || true)
+          gw_log=$(docker logs gw-live 2>&1)
+          printf '%s\n' "$gw_log"
+          echo "код ответа через шлюз: $code"
+          docker rm -f gw-live btls-upstream >/dev/null
 
-            CA=$(ls /tmp/ca-*.crt 2>/dev/null | head -1)
-            printf "\n===== берём УЦ: %s\n" "${CA:-НЕТ НИ ОДНОГО}"
-            [ -n "$CA" ] || exit 0
-            MD=$(basename "$CA" .crt); MD=${MD#ca-}
+          test "$code" = 200 \
+            || { echo "FAIL: рукопожатие через связку из двух якорей не прошло (код $code)" >&2; exit 1; }
+          echo 'ok: nginx договорился с BTLS-апстримом по связке из двух якорей'
 
-            t "запрос листа" openssl req -engine bee2evp -new -key /tmp/leaf.key -"$MD" \
-              -subj "/CN=btls-probe-upstream" -out /tmp/leaf.csr
-            t "подпись листа" openssl x509 -req -in /tmp/leaf.csr -CA "$CA" -CAkey /tmp/ca.key \
-              -"$MD" -days 2 -CAcreateserial -out /tmp/leaf.crt \
-              -extfile <(printf "subjectAltName=DNS:btls-probe-upstream\n")
-            t "цепочка сходится" openssl verify -CAfile "$CA" /tmp/leaf.crt
+          # ⚠ ОТРИЦАТЕЛЬНЫЙ СЛУЧАЙ. Без него `200` выше не отличает работающую проверку
+          # от выключенной: сними кто-нибудь `proxy_ssl_verify on` — и шаг остался бы
+          # зелёным, потому что рукопожатие прошло бы вообще без якорей. Здесь в связке
+          # ТОЛЬКО посторонний корень: нужного якоря нет, доверять нечему.
+          docker run -d --name btls-upstream2 --network btlsnet -v "$PKI:/pki:ro" \
+            --entrypoint /opt/btls/bin/openssl bee2-tls-gateway:ci \
+            s_server -accept 9345 -cert /pki/leaf.crt -key /pki/leaf.key \
+            -cipher DHE-BIGN-WITH-BELT-CTR-MAC-HBELT -tls1_2 -www >/dev/null
+          sleep 3
+          docker run -d --name gw-live-bad --network btlsnet -p 127.0.0.1:1095:1080 \
+            -e GW_UPSTREAM_HOST=btls-probe-upstream -e GW_UPSTREAM_PORT=9345 \
+            -v "$PKI/extra.crt:/etc/crypto-gw/ca/gossuok-bundle.pem:ro" \
+            bee2-tls-gateway:ci >/dev/null
+          for _ in $(seq 1 20); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' gw-live-bad)" = healthy ] && break
+            sleep 2
+          done
+          bad_code=$(curl -s -o /dev/null -w '%{http_code}' \
+            http://127.0.0.1:1095/open-banking/v1.0/ping || true)
+          echo "код ответа через связку без нужного якоря: $bad_code"
+          docker rm -f gw-live-bad btls-upstream2 >/dev/null
+          docker network rm btlsnet >/dev/null
 
-            [ -s /tmp/leaf.crt ] || { echo "листа нет — дальше смысла нет"; exit 0; }
-
-            # Живое рукопожатие BTLS с самим собой
-            openssl s_server -engine bee2evp -accept 4433 -cert /tmp/leaf.crt -key /tmp/leaf.key \
-              -cipher DHE-BIGN-WITH-BELT-CTR-MAC-HBELT -tls1_2 -www >/tmp/srv.log 2>&1 &
-            sleep 3
-            t "рукопожатие" bash -c "openssl s_client -engine bee2evp -connect 127.0.0.1:4433 \
-              -CAfile $CA -cipher DHE-BIGN-WITH-BELT-CTR-MAC-HBELT -tls1_2 \
-              -verify_return_error -verify_hostname btls-probe-upstream -brief </dev/null"
-            printf "\n===== лог сервера\n"; head -20 /tmp/srv.log
-          ' || echo "[замер завершился ненулевым кодом — это тоже результат]"
+          test "$bad_code" = 502 \
+            || { echo "FAIL: связка без нужного якоря дала $bad_code — проверка не работает" >&2; exit 1; }
+          echo 'ok: без нужного якоря шлюз отказывает — значит 200 выше настоящий'
 
       # Криптография СЧИТАЕТ ПРАВИЛЬНО — контрольные примеры СТБ 34.101.31/.45/.47/.77,
       # самотест ДСЧ, здоровье источников энтропии, обязательный криптонабор
