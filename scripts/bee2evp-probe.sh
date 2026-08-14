@@ -16,6 +16,12 @@
 # ⚠ НЕ РАБОТАЕТ С КЛЮЧОМ. Ни ключа ГосСУОК, ни носителя, ни пароля: скрипт только открывает
 # соединение и печатает, что ответил сервер.
 #
+# ⚠ СОБИРАЕТ И ЗАПУСКАЕТ ЧУЖОЙ КОД ВАШИМИ ПРАВАМИ, ВНЕ КОНТЕЙНЕРА. Он клонирует
+# github.com/bcrypto/bee2evp на пине из Dockerfile и исполняет его `build.sh` прямо в вашей
+# сессии. В образе та же сборка живёт в отбрасываемой стадии, и компилятор в рантайм не
+# попадает вовсе; здесь этой изоляции нет. По возможности гоняйте пробу в одноразовой VM или
+# контейнере, а не на самом деплой-хосте с доступом к банку.
+#
 # ⚠ Успех пробы — НЕ разрешение эксплуатировать. Достаточно ли несертифицированной
 # реализации по СПР 6.02 — вопрос юридический, и он живёт в docs/CERTIFICATION.md.
 #
@@ -57,10 +63,14 @@ say() { printf '\n=== %s ===\n' "$1"; }
 arg_of() {
   # Только строка с присваиванием: то же имя повторяется в стадиях без значения, и такие
   # строки источником правды не являются.
-  sed -n "s/^ARG[[:space:]]\+$1=\(\S\+\)[[:space:]]*$/\1/p" Dockerfile | head -1
+  # ⚠ Терпит кавычки и хвостовой комментарий: `ARG X="v"` и `ARG X=v # почему` — законный
+  # Dockerfile, а прежняя редакция на первом отдавала значение вместе с кавычками, на втором
+  # не находила ничего и падала с советом «запускайте из репозитория», хотя дело не в этом.
+  sed -n "s/^ARG[[:space:]]\+$1=\([^[:space:]#]\+\).*$/\1/p" Dockerfile | head -1 | tr -d '"'"'"
 }
 OPENSSL_TAG="${OPENSSL_TAG:-$(arg_of OPENSSL_TAG)}"
 BEE2EVP_COMMIT="${BEE2EVP_COMMIT:-$(arg_of BEE2EVP_COMMIT)}"
+PATCH_JITTER="$PWD/patches/bee2-pr77-jitter-thread.patch"
 if [[ -z "$OPENSSL_TAG" || -z "$BEE2EVP_COMMIT" ]]; then
   echo "не нашёл ARG OPENSSL_TAG / ARG BEE2EVP_COMMIT в Dockerfile — запускайте из репозитория" >&2
   exit 1
@@ -78,6 +88,9 @@ if [[ -n "$missing" ]]; then
 fi
 echo "всё на месте"
 echo "пины из Dockerfile: ${OPENSSL_TAG}, bee2evp ${BEE2EVP_COMMIT:0:8}"
+if [[ "$HOST" != "apibel.priorbank.by" ]]; then
+  echo "⚠ нестандартный адрес ($HOST) — вердикт ниже относится к нему, а не к боевому банку"
+fi
 
 # ⚠ КОНТРОЛЬ ИДЁТ ПЕРВЫМ, И БЕЗ НЕГО ПРОБА НИЧЕГО НЕ ДОКАЗЫВАЕТ. Успех патченой сборки на
 # хосте, который в тот день отвечал обычным TLS, выглядит точно так же, как успех настоящий.
@@ -109,26 +122,73 @@ else
 fi
 
 say "2. Сборка bee2evp + OpenSSL с патчем BTLS (${OPENSSL_TAG})"
-if [[ -x "$WORK/bee2evp/build/openssl/apps/openssl" ]]; then
-  echo "уже собрано, переиспользую: $WORK"
+# ⚠ ШТАМП ПИНОВ — ГЛАВНАЯ ЗАЩИТА ЭТОГО ШАГА, и её отсутствие было дефектом. Прежняя редакция
+# переиспользовала готовый бинарь, не спрашивая, на КАКИХ пинах он собран, а `git checkout`
+# вызывала только внутри ветки первого клона — то есть после бампа пина в Dockerfile скрипт
+# печатал новый пин в шапке и проверял СТАРУЮ сборку. Ровно то, что шапка обещает не
+# допустить: отвечал бы про версию стека, которую никто не собирал.
+STAMP="$WORK/.built-for"
+WANT_STAMP="${OPENSSL_TAG} ${BEE2EVP_COMMIT}"
+mkdir -p "$WORK" || { echo "не могу создать $WORK" >&2; exit 1; }
+chmod 700 "$WORK" 2>/dev/null || true
+if [[ -x "$WORK/bee2evp/build/local/bin/openssl" || -x "$WORK/bee2evp/build/openssl/apps/openssl" ]] \
+   && [[ "$(cat "$STAMP" 2>/dev/null)" == "$WANT_STAMP" ]]; then
+  echo "уже собрано на этих пинах, переиспользую: $WORK"
 else
-  mkdir -p "$WORK"
-  if [[ ! -d "$WORK/bee2evp/.git" ]]; then
-    git clone -q https://github.com/bcrypto/bee2evp "$WORK/bee2evp"
-    git -C "$WORK/bee2evp" checkout -q "$BEE2EVP_COMMIT" || {
-      echo "не удалось перейти на коммит $BEE2EVP_COMMIT — сверьтесь с Dockerfile"; exit 1; }
+  if [[ -e "$WORK/bee2evp" && "$(cat "$STAMP" 2>/dev/null)" != "$WANT_STAMP" ]]; then
+    echo "пины изменились (было: $(cat "$STAMP" 2>/dev/null || echo 'неизвестно')) — пересобираю с нуля"
+    rm -rf "$WORK/bee2evp" "$STAMP"
   fi
+  if [[ ! -d "$WORK/bee2evp/.git" ]]; then
+    git clone -q https://github.com/bcrypto/bee2evp "$WORK/bee2evp" || {
+      echo "не удалось клонировать bee2evp — проверьте сеть до github.com"; exit 1; }
+  fi
+  # ⚠ CHECKOUT ВЫНЕСЕН ИЗ-ПОД УСЛОВИЯ КЛОНА и подтверждён сверкой, как в Dockerfile (строка
+  # `test "$(git -C bee2evp rev-parse HEAD)" = ...`): код возврата `checkout` не доказывает,
+  # что мы оказались там, где хотели.
+  git -C "$WORK/bee2evp" checkout -q "$BEE2EVP_COMMIT" || {
+    echo "не удалось перейти на коммит $BEE2EVP_COMMIT — сверьтесь с Dockerfile"; exit 1; }
+  got_head="$(git -C "$WORK/bee2evp" rev-parse HEAD)"
+  [[ "$got_head" == "$BEE2EVP_COMMIT" ]] || {
+    echo "HEAD=$got_head, а ожидался $BEE2EVP_COMMIT — прерываюсь"; exit 1; }
+
+  # ⚠ ТЕ ЖЕ ПРАВКИ, ЧТО ДЕЛАЕТ Dockerfile ПЕРЕД СБОРКОЙ. Без них проба собирает ДРУГОЙ стек,
+  # чем едет в образе, и её ответ относится не к нашему изделию: (1) апстримный source.sh
+  # сравнивает строки через -eq и молча уходит в -O0; (2) patches/ несёт чужой патч на
+  # busy-loop jitter в bee2 — без него проба ещё и жжёт ядро всё время прогона.
+  # shellcheck disable=SC2016  # `$build_type` — литерал внутри ЧУЖОГО скрипта, а не наша переменная
+  if ! sed -i 's/"\$build_type" -eq "Debug"/"$build_type" == "Debug"/' "$WORK/bee2evp/scripts/source.sh" \
+     || ! grep -q '"\$build_type" == "Debug"' "$WORK/bee2evp/scripts/source.sh"; then
+    echo "не удалось починить scripts/source.sh — сверьтесь с Dockerfile"; exit 1
+  fi
+
   echo "собираю (это долго — сборка OpenSSL из исходников)…"
   ( cd "$WORK/bee2evp" && bash ./scripts/build.sh -s -b "$OPENSSL_TAG" ) \
     > "$WORK/build.log" 2>&1 || { echo "СБОРКА УПАЛА, хвост лога:"; tail -20 "$WORK/build.log"; exit 1; }
+
+  # Патч на bee2 накладывается ПОСЛЕ build.sh: раньше подмодуля bee2 на диске ещё нет.
+  if [[ -d "$WORK/bee2evp/bee2" && -r "$PATCH_JITTER" ]]; then
+    if git -C "$WORK/bee2evp/bee2" apply --check "$PATCH_JITTER" 2>/dev/null; then
+      git -C "$WORK/bee2evp/bee2" apply "$PATCH_JITTER" && echo "патч jitter наложен — пересобираю bee2"
+      ( cd "$WORK/bee2evp" && bash ./scripts/build.sh -s -b "$OPENSSL_TAG" ) >> "$WORK/build.log" 2>&1 \
+        || echo "⚠ пересборка после патча не удалась — результат отличается от образа, см. $WORK/build.log"
+    else
+      echo "⚠ патч jitter не накладывается (возможно, уже в апстриме) — сборка без него"
+    fi
+  else
+    echo "⚠ patches/bee2-pr77-jitter-thread.patch не найден — проба собрана БЕЗ него, в отличие от образа"
+  fi
+  echo "$WANT_STAMP" > "$STAMP"
   echo "готово"
 fi
 
 # Ищем бинарь, а не прописываем путь: раскладка между ревизиями bee2evp менялась.
 # Установленная копия (build/local/bin) предпочтительнее внутридеревной (build/openssl/apps) —
 # только рядом с первой лежат подходящие библиотеки.
-OSSL="$(find "$WORK" -type f -name openssl -perm -u+x 2>/dev/null | grep -E '/local/bin/openssl$' | head -1)"
-[[ -n "$OSSL" ]] || OSSL="$(find "$WORK" -type f -name openssl -perm -u+x 2>/dev/null | grep -E '/apps/openssl$' | head -1)"
+# ⚠ `-user` ОБЯЗАТЕЛЕН: мы собираемся ИСПОЛНИТЬ найденное, а путь предсказуем. `-perm -u+x`
+# говорит лишь «владельцу можно исполнять» — но не «владелец это вы».
+OSSL="$(find "$WORK" -type f -name openssl -perm -u+x -user "$(id -u)" 2>/dev/null | grep -E '/local/bin/openssl$' | head -1)"
+[[ -n "$OSSL" ]] || OSSL="$(find "$WORK" -type f -name openssl -perm -u+x -user "$(id -u)" 2>/dev/null | grep -E '/apps/openssl$' | head -1)"
 if [[ -z "$OSSL" ]]; then
   echo "не нашёл собранный openssl под $WORK — смотрите $WORK/build.log"; exit 1
 fi
@@ -137,8 +197,13 @@ fi
 # «version `OPENSSL_3.3.0' not found», либо — хуже — загружает их и не показывает ни одного
 # BTLS-набора. Читается это как «bee2evp не поддерживает шифронаборы» и закрывает
 # исследование ложноотрицательным результатом. Измерено, а не предположено.
+# ⚠ ЗАПАСНОЙ ПУТЬ ВЕДЁТ НА УРОВЕНЬ ВЫШЕ, А НЕ В КАТАЛОГ БИНАРЯ. Для внутридеревной сборки
+# (.../build/openssl/apps/openssl) библиотеки лежат в .../build/openssl, а НЕ в apps/. Прежний
+# фолбэк указывал в apps/, там libssl нет, подхватывались системные — и проба печатала «НЕТ —
+# сборка без BTLS-наборов», то есть ровно тот ложноотрицательный ответ, ради которого этот
+# LIBDIR и заведён.
 LIBDIR="$(dirname "$(dirname "$OSSL")")/lib"
-[[ -d "$LIBDIR" ]] || LIBDIR="$(dirname "$OSSL")"
+[[ -d "$LIBDIR" ]] || LIBDIR="$(dirname "$(dirname "$OSSL")")"
 ossl() { LD_LIBRARY_PATH="$LIBDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$OSSL" "$@"; }
 echo "openssl: $OSSL"
 echo "библиотеки: $LIBDIR"
@@ -154,8 +219,13 @@ fi
 echo "$suites"
 
 say "4. Рукопожатие с ${HOST}:${PORT} через bee2evp"
+# ⚠ БЕЗ `-verify_return_error`, И ЭТО НЕ НЕДОСМОТР. С ним рукопожатие обрывается на неудачной
+# проверке ДО того, как s_client напечатает `Cipher is`, — и разбор ниже, который отличает
+# «шифр согласован, но сертификат не проверен» от «шифр не согласован», становится
+# недостижимым: вместо диагноза печаталось бы «НЕОДНОЗНАЧНО». Нам нужен именно диагноз, а
+# результат проверки читается из `Verify return code`.
 verify_args=()
-[[ -n "$CAFILE" ]] && verify_args=(-CAfile "$CAFILE" -verify_return_error)
+[[ -n "$CAFILE" ]] && verify_args=(-CAfile "$CAFILE")
 probe_out="$(timeout 40 env LD_LIBRARY_PATH="$LIBDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
   "$OSSL" s_client -connect "${HOST}:${PORT}" -servername "$HOST" -showcerts \
   "${verify_args[@]}" </dev/null 2>&1)"
