@@ -177,6 +177,64 @@ else
   bad 'точное «=/» разрешено' "$out"
 fi
 
+# ---------------------------------------------------------------------------
+# Рекомендованный список из README — прогоняется ОТТУДА, а не переписывается сюда.
+#
+# ⚠ Зачем. README даёт оператору строку GW_ALLOW для боевого контура (маршруты DCR,
+# #64). Это единственный опубликованный «скопируй и запусти» рецепт ГРАНИЦЫ
+# БЕЗОПАСНОСТИ, и до этой проверки его не сторожило ничто: разъедься генератор с
+# документом — CI остался бы зелёным, а оператор открыл бы себе не то, что прочитал.
+# Приём тот же, которым сторожится команда диагностики в PROCESS.md §4: берём текст
+# из документа и исполняем его, чтобы копия не могла сгнить молча.
+README="$(cd "$(dirname "$0")/.." && pwd)/README.md"
+readme_list="$(
+  sed -n '/GW_ALLOW_DCR_BEGIN/,/GW_ALLOW_DCR_END/p' "$README" \
+    | sed -n "s/^-e GW_ALLOW='\(.*\)'$/\1/p"
+)"
+if [ -z "$readme_list" ]; then
+  bad 'список DCR извлекается из README' 'не нашёл строку между GW_ALLOW_DCR_BEGIN/END'
+else
+  ok 'список DCR извлекается из README'
+  out="$(run "$readme_list")"
+  # Каждая строка: «что ищем в дампе» + «человеческое имя». Проверяются ровно те
+  # утверждения, которые README печатает в своей таблице: вид совпадения и методы.
+  while IFS='|' read -r needle name; do
+    [ -n "$needle" ] || continue
+    if [[ "$out" == *"$needle"* ]]; then
+      ok "README-список: $name"
+    else
+      bad "README-список: $name" "не нашёл в дампе: $needle"
+    fi
+  done <<'CASES'
+location = /open-banking-dcr/v1.0/register {|создание приложения — ТОЧНЫЙ путь
+location /open-banking-dcr/v1.0/register/ {|чтение регистрации — поддерево
+location = /open-banking-dcr/v1.0/oidcdiscovery {|oidcdiscovery — ТОЧНЫЙ путь
+CASES
+  # Методы: README обещает POST только на создание и GET только на чтение. Без этой
+  # проверки список мог бы открыть POST на поддерево и остаться «совпадающим».
+  post_block="$(printf '%s' "$out" | sed -n '/location = \/open-banking-dcr\/v1.0\/register {/,/}/p')"
+  if [[ "$post_block" == *"limit_except POST {"* ]]; then
+    ok 'README-список: на создании разрешён только POST'
+  else
+    bad 'README-список: на создании разрешён только POST' "$post_block"
+  fi
+  read_block="$(printf '%s' "$out" | sed -n '/location \/open-banking-dcr\/v1.0\/register\/ {/,/}/p')"
+  if [[ "$read_block" == *"limit_except GET {"* ]]; then
+    ok 'README-список: на чтении регистрации разрешён только GET'
+  else
+    bad 'README-список: на чтении регистрации разрешён только GET' "$read_block"
+  fi
+  # Умолчание внутри рекомендации: рецепт обязан СОДЕРЖАТЬ прежние два маршрута.
+  # Потеряется один — у скопировавшего встанет работающая интеграция, и README
+  # предупреждает об этом словами. Пусть предупреждение будет ещё и проверкой.
+  if [[ "$out" == *"location = /open-banking-authorize/v1.0/oauth2/token {"* \
+     && "$out" == *"location /open-banking/v1.0/ {"* ]]; then
+    ok 'README-список: прежние два маршрута на месте'
+  else
+    bad 'README-список: прежние два маршрута на месте' "$out"
+  fi
+fi
+
 echo
 echo "пройдено: $pass, провалено: $fail"
 [ "$fail" -eq 0 ]
