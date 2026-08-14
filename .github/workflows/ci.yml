@@ -319,7 +319,9 @@ jobs:
       - name: Команда диагностики различает причины отказа
         run: |
           set -euo pipefail
-          # ⚠ Ровно та строка, что в PROCESS.md §4. Расхождение — дефект документации.
+          # ⚠ Флаги openssl — ровно те, что в PROCESS.md §4 (обвязка отличается: там `docker exec`
+          # по живому контейнеру, здесь одноразовый `docker run`). Расхождение ФЛАГОВ —
+          # дефект документации: оператор запустит не то, что проверено.
           diag() {  # diag <хост> <порт>
             docker run --rm --entrypoint /opt/btls/bin/openssl bee2-tls-gateway:ci \
               s_client -connect "$1:$2" -servername "$1" \
