@@ -29,6 +29,18 @@ http {
                   'rt=$request_time urt=$upstream_response_time';
     access_log /dev/stdout gw;
 
+    # ⚠ ВРЕМЕННО, ТОЛЬКО ДЛЯ ЗАМЕРА (#49). Убирается в следующем коммите.
+    # Задача просит различать в логе «банк лежит» и «мы перестали доверять банку», не
+    # понижая уровень error_log (на `error` nginx печатает строку запроса, а в пути едет
+    # номер счёта). Какие из upstream-переменных это различают — вопрос к живому nginx, а
+    # не к памяти: ни nginx, ни docker-демона на машине разработчика нет, поэтому замер
+    # делается смоуком. Формат печатает ВСЕ кандидаты сразу для двух сценариев отказа.
+    log_format gwdiag '$time_iso8601 DIAG status=$status ustatus=$upstream_status '
+                      'uaddr=$upstream_addr uconn=$upstream_connect_time '
+                      'urt=$upstream_response_time ubs=$upstream_bytes_sent '
+                      'ubr=$upstream_bytes_received';
+    access_log /dev/stdout gwdiag;
+
     # A deliberately constant rate-limit key — see the zone below. `map` is the only way
     # nginx lets you hand a literal to `limit_req_zone`, which insists on a variable.
     map $host $gw_limit_key {

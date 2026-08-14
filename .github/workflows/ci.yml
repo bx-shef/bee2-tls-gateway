@@ -308,6 +308,45 @@ jobs:
           grep -q 'генератор псевдослучайных чисел НЕ прошёл самотест' /tmp/selftest-rng.log
           echo 'ok: провал ДСЧ роняет контейнер своим сообщением'
 
+      # ⚠ ВРЕМЕННЫЙ ЗАМЕР (#49) — убирается вместе с форматом gwdiag.
+      # Нужно узнать, какие upstream-переменные nginx различают два вида отказа. Оба
+      # сценария строятся БЕЗ банка: «порт закрыт» и «TLS отвечает, но рукопожатие
+      # проваливается» (шлюз предлагает только BIGN-наборы, обычный сервер их не знает).
+      - name: ЗАМЕР — чем различаются два вида отказа апстрима
+        run: |
+          set -euo pipefail
+          probe() {  # probe <имя> <хост-апстрима> <порт-апстрима> <локальный-порт>
+            docker run -d --name "$1" -p "127.0.0.1:$4:1080" \
+              -e GW_UPSTREAM_HOST="$2" -e GW_UPSTREAM_PORT="$3" \
+              -e GW_ALLOW='GET /probe/' bee2-tls-gateway:ci >/dev/null
+            for _ in $(seq 1 20); do
+              [ "$(docker inspect -f '{{.State.Health.Status}}' "$1")" = healthy ] && break
+              sleep 2
+            done
+            curl -s -o /dev/null "http://127.0.0.1:$4/probe/x" || true
+            sleep 1
+            echo "=== $1 ==="
+            docker logs "$1" 2>&1 | grep DIAG || echo "(строк DIAG нет)"
+            docker rm -f "$1" >/dev/null
+          }
+
+          # Сценарий 1: на порту никого — отказ на этапе TCP.
+          probe gw-diag-down 127.0.0.1 9345 1090
+
+          # Сценарий 2: на порту обычный TLS-сервер. Общего шифронабора со шлюзом нет,
+          # значит TCP поднимется, а рукопожатие упадёт. Сертификат самоподписанный —
+          # проверка цепочки до него всё равно не дойдёт, и это тоже факт для замера.
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -subj '/CN=diag-probe' -keyout /tmp/diag.key -out /tmp/diag.crt 2>/dev/null
+          openssl s_server -quiet -accept 9346 \
+            -cert /tmp/diag.crt -key /tmp/diag.key >/dev/null 2>&1 &
+          s_server_pid=$!
+          sleep 2
+          bridge=$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}')
+          echo "мост docker: $bridge"
+          probe gw-diag-tls "$bridge" 9346 1091
+          kill "$s_server_pid" 2>/dev/null || true
+
       # Криптография СЧИТАЕТ ПРАВИЛЬНО — контрольные примеры СТБ 34.101.31/.45/.47/.77,
       # самотест ДСЧ, здоровье источников энтропии, обязательный криптонабор
       # МИ.10165.10.01 п. 4. До #19 это гонялось ТОЛЬКО ВРУЧНУЮ, то есть рано или поздно
