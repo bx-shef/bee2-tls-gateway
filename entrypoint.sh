@@ -24,7 +24,7 @@ die() { printf '[crypto-gw] FATAL: %s\n' "$*" >&2; exit 1; }
 #   request: "POST /open-banking-authorize/v1.0/oauth2/token HTTP/1.1"
 # for a statement call that path holds the account number. The same failures are already
 # visible in the access log as status=502 with route=, minus the identifier. Raise this
-# to `info` for a live run (README.md § "Что попадает в логи"), then put it back.
+# to `info` for a live run (docs/PROCESS.md §4, "Что попадает в логи"), then put it back.
 : "${GW_ERROR_LOG_LEVEL:=crit}"
 # See README § "Один поток всегда жжёт процессор". bee2 starts a permanent busy-loop
 # thread as an entropy source; niceness is what keeps it out of everyone else's way.
@@ -70,6 +70,19 @@ RENDERED=/tmp/crypto-gw.nginx.conf
 # нельзя было бы прогнать `scripts/check-allowlist.sh` — 28 проверок границы безопасности
 # требовали бы собранного криптостека, которого на машине разработчика нет.
 BEE2CMD_BIN=/opt/btls/bin/bee2cmd
+# ⚠ И openssl СЕКЦИИ 0 — тоже абсолютным путём, по той же причине, что и bee2cmd. Голый
+# `openssl` берётся из `PATH`, а `PATH` задаётся снаружи при `docker run`: заглушка,
+# перехватывающая `engine -t bee2evp` и `ciphers`, подделала бы вторую половину самотеста
+# БЕЗ единого монтирования. Довод «свой openssl сломает и всё остальное» неверен — трафик
+# идёт через `libssl`/`libbee2evp.so`, а не через CLI, так что подмена CLI на работу шлюза
+# не влияет вовсе. Гейты 1 и 3 в Dockerfile зовут этот бинарь абсолютным путём с самого
+# начала; расхождение было здесь.
+#
+# ⚠ Вызовы openssl в секциях 1, 2 и 2b НАМЕРЕННО остаются голыми. Они исполняются и вне
+# контейнера: выход по `GW_ALLOW_DUMP` стоит ниже них, и на нём держатся 28 проверок
+# `scripts/check-allowlist.sh`, где `/opt/btls/bin/openssl` не существует. Те проверки к
+# тому же предупреждают, а не отказывают, — подделывать в них нечего.
+OPENSSL_BIN=/opt/btls/bin/openssl
 if [[ "${GW_ALLOW_DUMP:-}" == 1 ]]; then
   log 'самотест пропущен: GW_ALLOW_DUMP — выгрузка конфигурации, трафик не обслуживается'
 else
@@ -91,11 +104,11 @@ log 'самотест ядра bee2: контрольные примеры и Д
 # ТОТ САМЫЙ стек, которым будут обслуживаться запросы: движок грузится и обязательный
 # криптонабор предлагается. Гейты 1 и 3 в Dockerfile проверяют ровно это, но при СБОРКЕ —
 # а библиотека может уехать после неё.
-engine_out="$(openssl engine -t bee2evp 2>&1)" \
+engine_out="$("$OPENSSL_BIN" engine -t bee2evp 2>&1)" \
   || die "самотест движка: openssl не смог опросить bee2evp. Вывод: ${engine_out}"
 [[ "$engine_out" == *available* ]] \
   || die "самотест движка: bee2evp НЕ доступен рабочему стеку (libbee2evp.so битая или не та). Вывод: ${engine_out}"
-openssl ciphers -v 'ALL:eNULL' 2>/dev/null | grep -q 'DHE-BIGN-WITH-BELT-CTR-MAC-HBELT' \
+"$OPENSSL_BIN" ciphers -v 'ALL:eNULL' 2>/dev/null | grep -q 'DHE-BIGN-WITH-BELT-CTR-MAC-HBELT' \
   || die 'самотест движка: рабочий стек не предлагает DHE-BIGN-WITH-BELT-CTR-MAC-HBELT (МИ.10165.10.01 п. 4). До банка такой шлюз не доедет.'
 log 'самотест рабочего стека: движок bee2evp доступен, криптонабор BTLS предлагается — OK'
 fi
