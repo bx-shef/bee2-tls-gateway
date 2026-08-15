@@ -48,6 +48,11 @@ _lock="$(git rev-parse --git-dir 2>/dev/null || echo .git)/check-allowlist.lock"
 if command -v flock >/dev/null 2>&1; then
   exec {_lock_fd}>"$_lock" || exit 1
   flock -w 120 "$_lock_fd" || { echo "FAIL не дождался замка $_lock" >&2; exit 1; }
+else
+  # ⚠ Не молча: «нет flock» неотличимо от «есть и работает» — тот же класс тихого
+  # вырождения, что и незнакомая переменная у образа (#75). Прогон без замка честен
+  # только в одиночку; предупреждение даёт это увидеть, не ломая машины без util-linux.
+  echo "ВНИМАНИЕ: flock не найден — прогон без замка, параллельный запуск даст ложные отказы" >&2
 fi
 
 pass=0
@@ -280,6 +285,28 @@ CASES
 open-banking-dcr-v1-0-register-1;|метка чтения регистрации — с суффиксом -1
 ROUTEMAP
 fi
+
+# ⚠ УМОЛЧАНИЕ ГОНЯЕТСЯ ТОЖЕ — БЕЗ GW_ALLOW ВОВСЕ, и до ревью PR #76 этого не делал
+# ни один быстрый тест: все вызовы run() передают явное значение, и ветка `${GW_ALLOW-…}`
+# исполнялась только в смоуке job `image`, необязательном чеке. Тестировщик показал
+# прогоном: правь умолчание как угодно — здесь всё оставалось зелёным. А умолчание — это
+# то, что получает КАЖДЫЙ, кто ничего не настраивал; его метки уже опубликованы.
+out_default="$(
+  GW_ALLOW_DUMP=1   GW_UPSTREAM_HOST=127.0.0.1   GW_CA_BUNDLE=ca/gossuok-bundle.pem   bash entrypoint.sh 2>&1
+)"
+while IFS='|' read -r needle name; do
+  [ -n "$needle" ] || continue
+  if [[ "$out_default" == *"$needle"* ]]; then
+    ok "умолчание: $name"
+  else
+    bad "умолчание: $name" "не нашёл в дампе: $needle"
+  fi
+done <<'DEFAULTS'
+location = /open-banking-authorize/v1.0/oauth2/token {|токен-эндпоинт, точный путь
+location /open-banking/v1.0/ {|ресурсный API, поддерево
+open-banking-authorize-v1-0-oauth2-token;|метка токена — без суффикса
+разрешено маршрутов — 2 |ровно два маршрута, не больше
+DEFAULTS
 
 # ⚠ Строка про число маршрутов — ЭТО КОНТРАКТ С ОПЕРАТОРОМ, а не украшение лога.
 # README учит: «нет этой строки при старте — сборка старая и переменную не знает». Так
