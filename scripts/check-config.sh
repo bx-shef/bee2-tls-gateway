@@ -29,12 +29,13 @@ cd "$(dirname "$0")/.."
 TEMPLATE=nginx.conf.template
 ENTRYPOINT=entrypoint.sh
 README=README.md
+HEALTHCHECK=healthcheck.sh
 
-for f in "$TEMPLATE" "$ENTRYPOINT" "$README"; do
+for f in "$TEMPLATE" "$ENTRYPOINT" "$README" "$HEALTHCHECK"; do
   [ -r "$f" ] || { echo "FAIL нет файла $f" >&2; exit 1; }
 done
 
-TEMPLATE="$TEMPLATE" ENTRYPOINT="$ENTRYPOINT" README="$README" python3 - <<'PY'
+TEMPLATE="$TEMPLATE" ENTRYPOINT="$ENTRYPOINT" README="$README" HEALTHCHECK="$HEALTHCHECK" python3 - <<'PY'
 import os
 import re
 import sys
@@ -42,6 +43,7 @@ import sys
 template = open(os.environ["TEMPLATE"], encoding="utf-8").read()
 entrypoint = open(os.environ["ENTRYPOINT"], encoding="utf-8").read()
 readme = open(os.environ["README"], encoding="utf-8").read()
+healthcheck = open(os.environ["HEALTHCHECK"], encoding="utf-8").read()
 
 # Код entrypoint.sh без строк-комментариев. Нужен проверкам 9: слова `st alg` и `st rng`
 # встречаются в комментариях выше по файлу (замеры времени), и поиск по всему тексту нашёл
@@ -369,8 +371,15 @@ else:
     # файле стоит предупреждение про сверку на вхождение подстроки.
     code_wo_list = entrypoint_code.replace(known.group(0), "")
     # Что код реально читает: `${GW_X:...}`, `${GW_X}`, `"${GW_X`, `$GW_X` — плюс шаблон.
+    # ⚠ ТРИ файла, а не два, и третий добавлен по ревью. `healthcheck.sh` читает
+    # `GW_LISTEN` напрямую, и до этой правки в область поиска не входил. Сегодня совпадение
+    # случайное — `GW_LISTEN` попадает в `used` через entrypoint. Появись завтра переменная,
+    # которую читает ТОЛЬКО healthcheck, и проверка «список не умалчивает» её не заметила бы,
+    # а рантайм из #75 объявил бы её «НЕИЗВЕСТНОЙ этой сборке» — то есть изделие соврало бы
+    # о себе, ссылаясь на нашу же проверку.
     used = set(re.findall(r"\bGW_[A-Z0-9_]+", code_wo_list)) | \
-           set(re.findall(r"\bGW_[A-Z0-9_]+", template))
+           set(re.findall(r"\bGW_[A-Z0-9_]+", template)) | \
+           set(re.findall(r"\bGW_[A-Z0-9_]+", healthcheck))
     # Служебное имя самого списка в счёт не идёт.
     used -= {"KNOWN_GW_VARS"}
     # ⚠ И сама строка обязана ПЕЧАТАТЬСЯ. Список, который никуда не выводится, — переменная
