@@ -30,6 +30,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 
 TPL = "nginx.conf.template"
 EP = "entrypoint.sh"
@@ -49,8 +50,26 @@ CR = "scripts/check-crypto.sh"
 MUTATED = (TPL, EP, DF, CR)
 
 
+# ⚠ Таймауты у ОБОИХ подпроцессов — #44. Зависший вызов (ждёт ввода, бесконечный цикл)
+# останавливал прогон С АКТИВНОЙ МУТАЦИЕЙ В ДЕРЕВЕ и взятым замком — ровно состояние #39,
+# только приходим мы в него не убийством, а тишиной: capture_output прячет вывод, и со
+# стороны зависший прогон неотличим от медленного. Локально это замок + ослабленная
+# граница в дереве до чьего-то `git status`; в CI — десять минут раннера и диагноз
+# «job отвалился по таймауту» вместо имени вставшей проверки.
+GIT_TIMEOUT = 10       # git локальный; секунды — уже патология
+CHECK_TIMEOUT = 120    # весь прогон сторожа укладывается в ~25 с; запас пятикратный
+
+
 def git(*args):
-    return subprocess.run(["git", *args], capture_output=True, text=True)
+    try:
+        return subprocess.run(["git", *args], capture_output=True, text=True,
+                              timeout=GIT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        # Заглушка с ненулевым кодом, а не исключение: restore() уже проверяет код
+        # возврата и жалуется громко, а исключение из atexit-отката умерло бы молча.
+        return subprocess.CompletedProcess(
+            ["git", *args], 124, "",
+            f"git {' '.join(args)} не завершился за {GIT_TIMEOUT} с — убит по таймауту")
 
 
 def restore():
@@ -60,10 +79,32 @@ def restore():
     например, проиграв гонку за `.git/index.lock` соседнему процессу, который читает
     `git status` в цикле (так делает scripts/check-mutations-harness.sh). Молчаливый
     неоткат — это ровно #39 с другой стороны: мутация остаётся, а прогон идёт дальше как
-    ни в чём не бывало. Здесь мы не можем ничего исправить (нас могли вызвать из
-    обработчика сигнала), но обязаны хотя бы сказать вслух.
+    ни в чём не бывало.
+
+    ⚠ ОДИН повтор после уборки СВОЕГО осиротевшего замка — не «ещё раз на всякий случай».
+    SIGTERM по группе (харнесс-сторож так и убивает) достаётся и НАШЕМУ дочернему git:
+    если сигнал пришёл, пока git держал index.lock, замок остаётся, и первый же повторный
+    checkout — включая вот этот, из обработчика сигнала, — падает 128 «File exists» об
+    останки собственного ребёнка. Ровно это показал CI 15.08.2026 (PR #77, шаг харнесса):
+    жертва честно пыталась откатиться и не смогла, а прибрать замок было некому.
+    Условие уборки то же, что у сторожа: замок ПУСТ. Живой чужой git тут исключён надёжнее,
+    чем у сторожа: мы внутри обработчика сигнала собственного процесса, наши дочерние git
+    только что убиты тем же сигналом по группе, а два прогона одновременно исключает flock.
     """
     p = git("checkout", "--", *MUTATED)
+    if p.returncode != 0:
+        # путь берём у git, а не строим руками: в worktree .git — файл, а не каталог
+        gd = git("rev-parse", "--git-dir").stdout.strip() or ".git"
+        lock = os.path.join(gd, "index.lock")
+        if os.path.exists(lock) and os.path.getsize(lock) == 0:
+            try:
+                os.unlink(lock)
+            except OSError:
+                pass
+            else:
+                print(f"убран осиротевший {lock} (git был убит с замком в руках), повторяю откат",
+                      file=sys.stderr)
+                p = git("checkout", "--", *MUTATED)
     if p.returncode != 0:
         print(
             f"FAIL откат не сработал (git checkout вернул {p.returncode}): "
@@ -96,8 +137,29 @@ def sub(path, pattern, repl):
     return True
 
 
-def run_checks(script="scripts/check-config.sh"):
-    p = subprocess.run(["bash", script], capture_output=True, text=True)
+def run_checks(script="scripts/check-config.sh", timeout=CHECK_TIMEOUT):
+    """rc None означает «проверка ЗАВИСЛА» — это отдельный исход, не красный и не зелёный.
+
+    ⚠ TimeoutExpired ловится КАК ПРОВАЛ ПРОВЕРКИ, а не как крах скрипта: прогон обязан
+    дойти до отката и до отчёта, называющего активную мутацию, — иначе таймаут в CI
+    читается так же плохо, как раньше читалось зависание.
+    """
+    try:
+        p = subprocess.run(["bash", script], capture_output=True, text=True,
+                           timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        # ⚠ exc.stdout здесь БАЙТЫ, несмотря на text=True, — особенность CPython
+        # (bpo-34572). Первая редакция клеила их со строкой и падала TypeError ровно на
+        # реалистичном зависании (проверка успела напечатать ok-строки и встала) — то
+        # есть крашилась на том самом входе, ради которого написана. Нашло ревью,
+        # воспроизведя прогоном; самопроверка ниже теперь печатает вывод ДО зависания,
+        # чтобы этот путь не остался снова непокрытым.
+        def _txt(x):
+            if x is None:
+                return ""
+            return x.decode("utf-8", "replace") if isinstance(x, bytes) else x
+        tail = (_txt(exc.stdout) + _txt(exc.stderr)).splitlines()[-3:]
+        return None, f"ЗАВИСЛА: {script} не завершился за {timeout} с; хвост: {tail}"
     return p.returncode, p.stdout + p.stderr
 
 
@@ -117,7 +179,10 @@ def mutate(name, apply_fn, want, script="scripts/check-config.sh"):
         return
     rc, out = run_checks(script)
     fails = [ln for ln in out.splitlines() if ln.startswith("FAIL")]
-    if rc == 0:
+    if rc is None:
+        # Именно ИМЯ активной мутации: без него таймаут читается как «что-то встало».
+        results.append(("СЛОМ", name, f"проверка зависла при активной мутации «{name}»: {out}"))
+    elif rc == 0:
         results.append(("СЛОМ", name, "ЗЕЛЁНЫЙ — проверка не ловит эту поломку"))
     elif not any(want in ln for ln in fails):
         results.append(("СЛОМ", name, f"красный, но не проверкой «{want}»: {fails}"))
@@ -147,7 +212,16 @@ except OSError:
     # поэтому «занят» здесь означает именно живой прогон, а не мусор от прошлого.
     sys.exit(f"FAIL мутационный прогон уже идёт (замок {_lock_path}) — прерываю")
 
-if git("status", "--porcelain", "--", *MUTATED).stdout.strip():
+# ⚠ Код возврата — РАНЬШЕ вывода, и это не педантизм: git-обёртка при таймауте
+# возвращает rc=124 с ПУСТЫМ stdout, а пустой stdout здесь читался как «дерево чистое».
+# Ревью показало прогоном с зависающим git в PATH: предохранитель пропускал грязное
+# дерево молча, и первый restore() затирал несохранённую работу в MUTATED-файлах без
+# единого предупреждения. Зависший git status — не экзотика: сетевая ФС, чужой замок.
+_st = git("status", "--porcelain", "--", *MUTATED)
+if _st.returncode != 0:
+    sys.exit(f"FAIL git status не отработал (rc={_st.returncode}): {_st.stderr.strip()} — "
+             "состояние дерева НЕИЗВЕСТНО, прерываю")
+if _st.stdout.strip():
     sys.exit(
         "FAIL мутируемые файлы изменены — откат идёт через git, прерываю.\n"
         "  Если прогон до этого убивали (таймаут, Ctrl-C, SIGKILL), мутация могла остаться\n"
@@ -181,9 +255,35 @@ atexit.register(restore)
 for _sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
     signal.signal(_sig, _on_signal)
 
+# ⚠ Самопроверка таймаута идёт ПЕРВОЙ, и у неё тот же профиль, что у обработчиков
+# сигналов: путь, который в зелёном прогоне не исполняется ни разу. Заведомо зависающий
+# скрипт с коротким таймаутом обязан вернуться rc=None, а не повесить прогон, — иначе вся
+# правка #44 держится на слове. Две секунды за то, чтобы мёртвая ветка не жила годами.
+# ⚠ echo ДО sleep обязателен: он гонит вывод в exc.stdout и покрывает путь с байтами
+# (bpo-34572), на котором первая редакция крашилась. Молча зависающий скрипт этот путь
+# не исполняет — самопроверка была бы зелёной при живом краше.
+# ⚠ unlink в finally: упади run_checks по любой причине, мусор в /tmp не останется.
+# Осиротевший от таймаута sleep 999 (python не убивает потомков bash) — принятая мелочь:
+# на эфемерном раннере он умирает с job, на машине разработчика догорает сам.
+with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as _hang:
+    _hang.write("#!/bin/sh\necho 'вывод до зависания'\nsleep 999\n")
+try:
+    _rc, _out = run_checks(_hang.name, timeout=2)
+finally:
+    os.unlink(_hang.name)
+if _rc is not None:
+    sys.exit(f"FAIL самопроверка таймаута: зависший скрипт вернул rc={_rc}, а не None")
+if "вывод до зависания" not in _out:
+    sys.exit(f"FAIL самопроверка таймаута: вывод до зависания потерян: {_out}")
+# ⚠ НЕ в results: там считаются мутации, и служебная запись завышала счётчик — скрипт
+# печатал «все 70 мутаций», имея 69. Нашли двое из пяти на ревью, порознь.
+print(f"ok   таймаут ловит зависшую проверку и доносит вывод: {_out.split(';')[0]}")
+
 for script in ("scripts/check-config.sh", "scripts/check-pins.sh",
                "scripts/check-allowlist.sh"):
     rc, out = run_checks(script)
+    if rc is None:
+        sys.exit(f"FAIL базовая линия у {script} ЗАВИСЛА ещё до мутаций:\n{out}")
     if rc != 0:
         sys.exit(f"FAIL базовая линия КРАСНАЯ у {script} — чинить его, а не мутации:\n{out}")
 results.append(("ok", "базовая линия без мутаций", "зелёная у всех сторожей"))
@@ -606,13 +706,23 @@ width = max(len(name) for _, name, _ in results)
 for status, name, detail in results:
     print(f"{status:4} {name:<{width}}  {detail}")
 
+# ⚠ Счётчик — по числу МУТАЦИЙ, а не по длине списка с вычитанием констант. Вычитание
+# `- 1` уже соврало один раз: вторая служебная запись сдвинула его, и скрипт печатал
+# «все 70 мутаций», имея 69. Служебная запись помечена своим именем и в счёт не идёт.
+SERVICE = {"базовая линия без мутаций"}
+mutations_total = sum(1 for r in results if r[1] not in SERVICE)
 broken = [r for r in results if r[0] != "ok"]
-dirty = git("status", "--porcelain", "--", *MUTATED).stdout.strip()
+# ⚠ Тот же порядок, что у входного предохранителя: rc раньше вывода, иначе таймаут
+# git status читался бы финальным отчётом как «мутации откатились».
+_fin = git("status", "--porcelain", "--", *MUTATED)
+dirty = _fin.stdout.strip()
+if _fin.returncode != 0:
+    dirty = f"git status не отработал (rc={_fin.returncode}) — состояние дерева НЕИЗВЕСТНО"
 if dirty:
     print(f"\nFAIL мутации не откатились: {dirty}", file=sys.stderr)
 if broken:
-    print(f"\nFAIL мёртвых проверок: {len(broken)} из {len(results) - 1}", file=sys.stderr)
+    print(f"\nFAIL мёртвых проверок: {len(broken)} из {mutations_total}", file=sys.stderr)
 if broken or dirty:
     sys.exit(1)
-print(f"\nвсе {len(results) - 1} мутаций краснеют своей проверкой")
+print(f"\nвсе {mutations_total} мутаций краснеют своей проверкой")
 PY
