@@ -30,6 +30,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 
 TPL = "nginx.conf.template"
 EP = "entrypoint.sh"
@@ -49,8 +50,26 @@ CR = "scripts/check-crypto.sh"
 MUTATED = (TPL, EP, DF, CR)
 
 
+# ⚠ Таймауты у ОБОИХ подпроцессов — #44. Зависший вызов (ждёт ввода, бесконечный цикл)
+# останавливал прогон С АКТИВНОЙ МУТАЦИЕЙ В ДЕРЕВЕ и взятым замком — ровно состояние #39,
+# только приходим мы в него не убийством, а тишиной: capture_output прячет вывод, и со
+# стороны зависший прогон неотличим от медленного. Локально это замок + ослабленная
+# граница в дереве до чьего-то `git status`; в CI — десять минут раннера и диагноз
+# «job отвалился по таймауту» вместо имени вставшей проверки.
+GIT_TIMEOUT = 10       # git локальный; секунды — уже патология
+CHECK_TIMEOUT = 120    # весь прогон сторожа укладывается в ~25 с; запас пятикратный
+
+
 def git(*args):
-    return subprocess.run(["git", *args], capture_output=True, text=True)
+    try:
+        return subprocess.run(["git", *args], capture_output=True, text=True,
+                              timeout=GIT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        # Заглушка с ненулевым кодом, а не исключение: restore() уже проверяет код
+        # возврата и жалуется громко, а исключение из atexit-отката умерло бы молча.
+        return subprocess.CompletedProcess(
+            ["git", *args], 124, "",
+            f"git {' '.join(args)} не завершился за {GIT_TIMEOUT} с — убит по таймауту")
 
 
 def restore():
@@ -96,8 +115,19 @@ def sub(path, pattern, repl):
     return True
 
 
-def run_checks(script="scripts/check-config.sh"):
-    p = subprocess.run(["bash", script], capture_output=True, text=True)
+def run_checks(script="scripts/check-config.sh", timeout=CHECK_TIMEOUT):
+    """rc None означает «проверка ЗАВИСЛА» — это отдельный исход, не красный и не зелёный.
+
+    ⚠ TimeoutExpired ловится КАК ПРОВАЛ ПРОВЕРКИ, а не как крах скрипта: прогон обязан
+    дойти до отката и до отчёта, называющего активную мутацию, — иначе таймаут в CI
+    читается так же плохо, как раньше читалось зависание.
+    """
+    try:
+        p = subprocess.run(["bash", script], capture_output=True, text=True,
+                           timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        tail = ((exc.stdout or "") + (exc.stderr or "")).splitlines()[-3:]
+        return None, f"ЗАВИСЛА: {script} не завершился за {timeout} с; хвост: {tail}"
     return p.returncode, p.stdout + p.stderr
 
 
@@ -117,7 +147,10 @@ def mutate(name, apply_fn, want, script="scripts/check-config.sh"):
         return
     rc, out = run_checks(script)
     fails = [ln for ln in out.splitlines() if ln.startswith("FAIL")]
-    if rc == 0:
+    if rc is None:
+        # Именно ИМЯ активной мутации: без него таймаут читается как «что-то встало».
+        results.append(("СЛОМ", name, f"проверка зависла при активной мутации «{name}»: {out}"))
+    elif rc == 0:
         results.append(("СЛОМ", name, "ЗЕЛЁНЫЙ — проверка не ловит эту поломку"))
     elif not any(want in ln for ln in fails):
         results.append(("СЛОМ", name, f"красный, но не проверкой «{want}»: {fails}"))
@@ -181,9 +214,23 @@ atexit.register(restore)
 for _sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
     signal.signal(_sig, _on_signal)
 
+# ⚠ Самопроверка таймаута идёт ПЕРВОЙ, и у неё тот же профиль, что у обработчиков
+# сигналов: путь, который в зелёном прогоне не исполняется ни разу. Заведомо зависающий
+# скрипт с коротким таймаутом обязан вернуться rc=None, а не повесить прогон, — иначе вся
+# правка #44 держится на слове. Две секунды за то, чтобы мёртвая ветка не жила годами.
+with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as _hang:
+    _hang.write("#!/bin/sh\nsleep 999\n")
+_rc, _out = run_checks(_hang.name, timeout=2)
+os.unlink(_hang.name)
+if _rc is not None:
+    sys.exit(f"FAIL самопроверка таймаута: зависший скрипт вернул rc={_rc}, а не None")
+results.append(("ok", "таймаут ловит зависшую проверку", _out.split(";")[0]))
+
 for script in ("scripts/check-config.sh", "scripts/check-pins.sh",
                "scripts/check-allowlist.sh"):
     rc, out = run_checks(script)
+    if rc is None:
+        sys.exit(f"FAIL базовая линия у {script} ЗАВИСЛА ещё до мутаций:\n{out}")
     if rc != 0:
         sys.exit(f"FAIL базовая линия КРАСНАЯ у {script} — чинить его, а не мутации:\n{out}")
 results.append(("ok", "базовая линия без мутаций", "зелёная у всех сторожей"))

@@ -67,6 +67,32 @@ kill_group() {
   fi
 }
 
+# --- осиротевший .git/index.lock (#44) ----------------------------------------------
+# SIGTERM по группе умеет попасть в git ровно между созданием index.lock и его
+# удалением. Откат при этом ПРОХОДИТ (дерево чистое, харнесс зелёный), а репозиторий
+# остаётся залоченным — и падает не харнесс, а СЛЕДУЮЩАЯ команда человека, уже без
+# всякой связи с причиной: `fatal: Unable to create .git/index.lock: File exists`.
+# Наблюдалось живьём дважды: один раз из двух прогонов при вводе #42 и ещё раз 15.08.2026
+# на ревью PR #76. Гонка узкая, но не редкая.
+#
+# ⚠ Убираем замок ТОЛЬКО при обоих условиях сразу: файл ПУСТ и убитая группа МЕРТВА.
+# Настоящий index.lock живого git непустым не бывает недолго, но группа — наш собственный
+# критерий: её номер харнесс знает и её смерти уже дождался. Снять замок у работающего
+# git значило бы повредить индекс — сторож не имеет права быть опаснее того, кого
+# сторожит. Не подошли условия — не трогаем, а НАЗЫВАЕМ: непонятная ошибка у человека
+# хуже лишней строки в логе.
+INDEX_LOCK="$(git rev-parse --git-dir)/index.lock"
+clear_stale_index_lock() {
+  [ -e "$INDEX_LOCK" ] || return 0
+  if [ ! -s "$INDEX_LOCK" ] && ! group_alive; then
+    rm -f "$INDEX_LOCK"
+    printf '     убран осиротевший %s — git был убит между созданием замка и его снятием\n' "$INDEX_LOCK"
+  else
+    printf 'ВНИМАНИЕ: остался %s — если git не работает, уберите его: rm -f %s\n' \
+      "$INDEX_LOCK" "$INDEX_LOCK" >&2
+  fi
+}
+
 dump_log() {
   printf '     --- лог прогона (%s) ---\n' "$LOG" >&2
   tail -20 "$LOG" 2>/dev/null | sed 's/^/     /' >&2
@@ -163,6 +189,7 @@ for attempt in 1 2 3; do
   fi
   kill_group
   wait_for "$BUDGET_GONE" group_gone || true
+  clear_stale_index_lock
   if grep -q "$DONE_MARK" "$LOG" 2>/dev/null; then
     printf '     попытка %d: харнесс успел доработать сам — проверка была бы вхолостую, повторяю\n' "$attempt"
     git checkout -- "${MUTATED[@]}" 2>/dev/null || true
@@ -207,6 +234,7 @@ if start_harness; then
   fi
   kill_group
   wait_for "$BUDGET_GONE" group_gone || true
+  clear_stale_index_lock
   BG_PGID=""
 fi
 wait_for "$BUDGET_CLEAN" not_dirty || true
