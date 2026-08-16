@@ -180,7 +180,11 @@ done
 # Без этого отрицательного случая матрица выше не стоит ничего: сними кто-нибудь
 # `proxy_ssl_verify on` — все 12 положительных клеток остались бы зелёными.
 hport=$((hport + 1))
-run_gw gw-stand-badtrust btls-stand_s256 8443 "$hport"
+# GW_ERROR_LOG_LEVEL=error несущий: умолчание crit НАМЕРЕННО душит [error]-строки nginx
+# (там полная строка запроса с идентификаторами — entrypoint.sh об этом прямо), а
+# verify-ошибка апстрима пишется ровно на error и на crit в лог не попадает вовсе.
+# Здесь это безопасно: оснастка, /check_server, чувствительных данных в запросе нет.
+run_gw gw-stand-badtrust btls-stand_s256 8443 "$hport" -e GW_ERROR_LOG_LEVEL=error
 bad_code=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' \
   "http://127.0.0.1:$hport/check_server" || true)
 bad_log=$(docker logs gw-stand-badtrust 2>&1)
