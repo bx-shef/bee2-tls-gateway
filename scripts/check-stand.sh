@@ -85,9 +85,13 @@ docker image inspect "$GW_IMAGE" >/dev/null 2>&1 \
 build_stand_image() {
   local name="$1"
   if [ "${STAND_CACHE:-}" = gha ]; then
+    # Требует прокинутого ACTIONS_RUNTIME_TOKEN (шаг ghaction-github-runtime в ci.yml):
+    # сырой buildx из run-шага сам его не достаёт. ignore-error на cache-to несущий:
+    # на форк-PR токен read-only, запись в кэш запрещена — без ignore-error провал
+    # ЭКСПОРТА валил бы удавшуюся СБОРКУ, и стенд краснел бы у любого внешнего автора.
     docker buildx build --load \
       --cache-from "type=gha,scope=stand-$name" \
-      --cache-to "type=gha,mode=max,scope=stand-$name" \
+      --cache-to "type=gha,mode=max,scope=stand-$name,ignore-error=true" \
       -t "btls/$name" "$BTLS_DIR/server/$name"
   else
     docker build -t "btls/$name" "$BTLS_DIR/server/$name"

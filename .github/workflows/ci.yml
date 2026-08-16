@@ -177,6 +177,15 @@ jobs:
       - name: Buildx
         uses: docker/setup-buildx-action@v4
 
+      # Прокидывает ACTIONS_RUNTIME_TOKEN/ACTIONS_CACHE_URL в окружение шагов: без этого
+      # «сырой» `docker buildx build --cache-to type=gha` из run-шага (сборка стенда в
+      # check-stand.sh) не может авторизоваться в кэше и валит сборку на экспорте.
+      # Шагу «Сборка образа» это не нужно — docker/build-push-action достаёт токен сам,
+      # внутри своего процесса; run-шагам — не достаёт никто, это документированное
+      # требование BuildKit для inline-вызовов.
+      - name: Runtime для gha-кэша в run-шагах
+        uses: crazy-max/ghaction-github-runtime@v4
+
       # Сборка доказывает, что криптостек компилируется, цепочка сертификатов проверяется
       # и атрибуция лицензий доехала — четыре гейта живут внутри Dockerfile. Она НЕ
       # доказывает, что контейнер стартует: между
