@@ -18,16 +18,23 @@
 # --soft без последующей проверки в вызывающем коде — это дыра, а не мягкость.
 set -euo pipefail
 
+# Разбор не зависит от порядка аргументов: `wait-healthy.sh gw-foo --soft` в наивном
+# варианте принял бы --soft за имя контейнера и молча ждал бы несуществующий контейнер.
 soft=0
 tries=20
-while [ $# -gt 1 ]; do
+container=''
+while [ $# -gt 0 ]; do
   case "$1" in
-    --soft)  soft=1; shift ;;
-    --tries) tries="$2"; shift 2 ;;
-    *) echo "wait-healthy.sh: неизвестный аргумент $1" >&2; exit 2 ;;
+    --soft)  soft=1 ;;
+    --tries) tries="${2:?wait-healthy.sh: --tries требует числа}"; shift ;;
+    --*) echo "wait-healthy.sh: неизвестный флаг $1" >&2; exit 2 ;;
+    *)
+      [ -z "$container" ] || { echo "wait-healthy.sh: контейнер уже задан ($container), лишний аргумент $1" >&2; exit 2; }
+      container="$1" ;;
   esac
+  shift
 done
-container="${1:?wait-healthy.sh: имя контейнера обязательно}"
+[ -n "$container" ] || { echo 'wait-healthy.sh: имя контейнера обязательно' >&2; exit 2; }
 
 for _ in $(seq 1 "$tries"); do
   [ "$(docker inspect -f '{{.State.Health.Status}}' "$container" 2>/dev/null)" = healthy ] && exit 0

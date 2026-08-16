@@ -47,9 +47,12 @@ services:
     container_name: stand-btls256
     command: ["/usr/sbin/nginx", "-g", "daemon off;"]
     healthcheck:
-      test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/8443"]
+      # Все шесть портов, а не один 8443: healthy по одному порту молча пропускал бы
+      # контейнер с несобравшимся TLS 1.3-вхостом, и 502 в матрице читался бы как
+      # «несогласуемо», хотя порт просто мёртв.
+      test: ["CMD", "bash", "-c", "for p in 8443 8444 8445 8446 8447 8448; do exec 3<>/dev/tcp/127.0.0.1/$p || exit 1; exec 3<&-; done"]
       interval: 2s
-      timeout: 3s
+      timeout: 5s
       retries: 15
     networks:
       s256:
@@ -65,9 +68,12 @@ services:
     container_name: stand-btls384
     command: ["/usr/sbin/nginx", "-g", "daemon off;"]
     healthcheck:
-      test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/8443"]
+      # Все шесть портов, а не один 8443: healthy по одному порту молча пропускал бы
+      # контейнер с несобравшимся TLS 1.3-вхостом, и 502 в матрице читался бы как
+      # «несогласуемо», хотя порт просто мёртв.
+      test: ["CMD", "bash", "-c", "for p in 8443 8444 8445 8446 8447 8448; do exec 3<>/dev/tcp/127.0.0.1/$p || exit 1; exec 3<&-; done"]
       interval: 2s
-      timeout: 3s
+      timeout: 5s
       retries: 15
     networks:
       s384:
@@ -80,9 +86,12 @@ services:
     container_name: stand-btls512
     command: ["/usr/sbin/nginx", "-g", "daemon off;"]
     healthcheck:
-      test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/8443"]
+      # Все шесть портов, а не один 8443: healthy по одному порту молча пропускал бы
+      # контейнер с несобравшимся TLS 1.3-вхостом, и 502 в матрице читался бы как
+      # «несогласуемо», хотя порт просто мёртв.
+      test: ["CMD", "bash", "-c", "for p in 8443 8444 8445 8446 8447 8448; do exec 3<>/dev/tcp/127.0.0.1/$p || exit 1; exec 3<&-; done"]
       interval: 2s
-      timeout: 3s
+      timeout: 5s
       retries: 15
     networks:
       s512:

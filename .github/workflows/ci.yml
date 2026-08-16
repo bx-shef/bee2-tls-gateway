@@ -915,6 +915,24 @@ jobs:
             -v "$PWD/scripts:/scripts:ro" \
             bee2-tls-gateway:ci /scripts/check-crypto.sh
 
+      # Сторож сторожа для нового помощника (#62): ожидание, которое не умеет краснеть,
+      # неотличимо от работающего. Контейнер с заведомо провальным healthcheck обязан
+      # уронить wait-healthy.sh без --soft и НЕ уронить с ним. Дёшево: busybox, ~10 секунд.
+      - name: wait-healthy.sh краснеет на unhealthy и молчит с --soft
+        run: |
+          set -euo pipefail
+          docker run -d --name wh-probe --health-cmd false \
+            --health-interval 1s --health-retries 2 --health-start-period 0s \
+            busybox sleep 60 >/dev/null
+          if bash scripts/wait-healthy.sh --tries 3 wh-probe 2>/dev/null; then
+            echo 'FAIL: wait-healthy.sh не упал на заведомо unhealthy контейнере' >&2
+            exit 1
+          fi
+          bash scripts/wait-healthy.sh --tries 3 --soft wh-probe \
+            || { echo 'FAIL: --soft обязан выйти нулём' >&2; exit 1; }
+          docker rm -f wh-probe >/dev/null
+          echo 'ok: помощник ожидания краснеет на своей поломке и молчит по --soft'
+
       # ---- эталонный стенд Приложения Г (#82, A6) ------------------------------------
       # Та самая среда, в которой изделие будут испытывать (МИ.10165.10.01, Приложение Г):
       # серверы bcrypto/btls на нашем же стеке. Матрица — три уровня стойкости × шесть

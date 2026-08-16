@@ -102,6 +102,23 @@ build_stand_image btls512
 bee2evp_sha=$(docker run --rm btls/btls256 git -C /root/bee2evp rev-parse HEAD)
 log "эталон собран с bee2evp ${bee2evp_sha} (в Dockerfile эталона пина нет — дрейф виден этой строкой)"
 
+# Сводка в summary джобы — идиома проекта «не искать в логах»: по этим строкам между
+# прогонами видно, дрейфанул ли эталон (digest сменился → кэш пересобрался → bee2evp мог
+# уехать). Лог CI эфемерен, summary — тоже, но сравнивать два summary глазами дешевле,
+# чем грепать два лога. Локально переменная не задана — блок просто пропускается.
+if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+  {
+    echo '## Эталонный стенд'
+    echo '```'
+    echo "btls pin:  $pin"
+    echo "bee2evp:   $bee2evp_sha (в эталоне не запинен)"
+    for n in btls256 btls384 btls512; do
+      printf '%s:   %s\n' "$n" "$(docker inspect --format '{{.Id}}' "btls/$n")"
+    done
+    echo '```'
+  } >> "$GITHUB_STEP_SUMMARY"
+fi
+
 # ---- подъём стенда -----------------------------------------------------------------
 compose up -d
 for c in stand-echo stand-btls256 stand-btls384 stand-btls512; do
@@ -110,13 +127,32 @@ done
 
 # Слой диагностики ДО матрицы: если прямой s_client из нашего же образа не согласует
 # обязательный набор со стендом, чинить надо стенд или стек, а не смотреть на 502 шлюза.
-log "== прямая проба: обязательный 0xFF15 против btls256:8443 =="
-probe=$(docker run --rm --network btls-stand_s256 --entrypoint /opt/btls/bin/openssl \
-  "$GW_IMAGE" s_client -connect www.example.org:8443 -tls1_2 \
-  -cipher DHE-BIGN-WITH-BELT-CTR-MAC-HBELT -brief </dev/null 2>&1 || true)
-grep -q 'Ciphersuite: DHE-BIGN-WITH-BELT-CTR-MAC-HBELT' <<<"$probe" \
-  || { printf '%s\n' "$probe" >&2; die "стенд не согласовал обязательный набор прямой пробой — матрица бессмысленна"; }
-log "ok   стенд говорит BTLS, обязательный набор согласуется"
+# Проба гоняется по ВСЕМ трём уровням: bee2evp у них общий (384/512 — FROM btls256), а
+# вот ключ и сертификат у каждого свои — битый PEM уровня всплыл бы иначе глубоко в
+# матрице неотличимо от прочих 502.
+s_probe() {
+  # s_probe СЕТЬ ПОРТ [доп. аргументы s_client...]
+  local net="$1" port="$2"; shift 2
+  docker run --rm --network "$net" --entrypoint /opt/btls/bin/openssl \
+    "$GW_IMAGE" s_client -connect "www.example.org:$port" -brief "$@" </dev/null 2>&1 || true
+}
+for s in 256 384 512; do
+  probe=$(s_probe "btls-stand_s$s" 8443 -tls1_2 -cipher DHE-BIGN-WITH-BELT-CTR-MAC-HBELT)
+  grep -q 'Ciphersuite: DHE-BIGN-WITH-BELT-CTR-MAC-HBELT' <<<"$probe" \
+    || { printf '%s\n' "$probe" >&2; die "btls$s не согласовал обязательный набор прямой пробой — матрица бессмысленна"; }
+done
+log "ok   стенд говорит BTLS на всех трёх уровнях, обязательный набор согласуется"
+
+# TLS 1.3-порты обязаны быть ЖИВЫМИ до того, как матрица истолкует их 502 как
+# «несогласуемо»: healthcheck доказывает только «порт слушает», а здесь — «порт говорит
+# TLS». Любой TLS-ответ годится — согласование (если наш стек знает их наборы) или
+# alert: оба исхода отличают живой TLS 1.3-вход от порта, за которым ничего нет.
+for port in 8447 8448; do
+  probe=$(s_probe btls-stand_s256 "$port" -tls1_3)
+  grep -Eq 'Ciphersuite:|alert|handshake failure|wrong version' <<<"$probe" \
+    || { printf '%s\n' "$probe" >&2; die "порт $port не ответил на уровне TLS — 502 матрицы был бы приписан несогласуемости зря"; }
+done
+log "ok   TLS 1.3-порты живы — их 502 в матрице означает несогласуемость, не мёртвый порт"
 
 # ---- матрица: три уровня стойкости × шесть портов ----------------------------------
 declare -A EXPECT=(
@@ -131,8 +167,11 @@ run_gw() {
   local name="$1" net="$2" uport="$3" hport="$4"; shift 4
   # --health-interval: у образа 30s — для одиночного контейнера в бою правильно, для
   # девятнадцати последовательных запусков матрицы означало бы ~10 минут чистого ожидания.
+  # Остальные health-флаги переопределены В СОГЛАСИИ с wait-healthy.sh (40 секунд):
+  # с образными timeout=5s/start-period=15s docker объявил бы unhealthy только к ~55-й
+  # секунде — wait-healthy падал бы раньше, чем docker закончил решать, ложным красным.
   docker run -d --name "$name" --network "$net" -p "127.0.0.1:$hport:1080" \
-    --health-interval=2s --health-retries=20 \
+    --health-interval=2s --health-timeout=3s --health-start-period=5s --health-retries=15 \
     -e GW_UPSTREAM_HOST=www.example.org -e GW_UPSTREAM_PORT="$uport" \
     -e GW_ALLOW='GET =/check_server' \
     "$@" "$GW_IMAGE" >/dev/null
