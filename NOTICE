@@ -93,4 +93,12 @@ redistributed — only the resulting binaries are.
     OpenSSL build into --debug, i.e. -O0. See the comment at that RUN step in
     the Dockerfile.
 
+  * bee2 (the bee2evp submodule) is patched with
+    patches/bee2-pr77-jitter-thread.patch, which modifies
+    bee2/src/core/rng/rng_timer.c — the lifecycle of the jitter entropy
+    source (a worker thread replacing a busy-loop). The patch originates
+    from an open upstream pull request (bcrypto/bee2 PR #77, not merged at
+    the time of writing) and is applied verbatim at build time; two gates in
+    the Dockerfile verify it landed and survived until compilation.
+
 No other third-party source file is modified.
