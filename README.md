@@ -1,6 +1,6 @@
 # bee2-tls-gateway
 
-> Last reviewed: 2026-08-16
+> Last reviewed: 2026-08-18
 
 Шлюз внутрь HTTP, наружу BTLS | OpenSSL/nginx/bee2/ГосСУОК
 
