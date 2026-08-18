@@ -77,6 +77,19 @@ else
   log "эталон склонирован на пин $pin: $BTLS_DIR"
 fi
 
+# ⚠ Эталон сегодня НЕ собирается из собственных источников, и это нашёл первый живой
+# прогон CI: zlib.net на корневом URL держит только текущий релиз, старый отдаёт
+# HTML-страницей с кодом 200 (12 КБ вместо тарбола), а nginx.sh эталона без set -e
+# глотает отказ и доводит сборку до «успеха» БЕЗ nginx вовсе. Правим ровно URL — та же
+# версия 1.3.2, постоянный адрес fossils; сама буква эталона в остальном не тронута.
+# Отклонение записано в PROCESS.md §5. Патчится только btls256 — 384/512 собираются
+# FROM него и nginx.sh не запускают.
+sed -i 's|http://zlib.net/zlib-1.3.2.tar.gz|https://zlib.net/fossils/zlib-1.3.2.tar.gz|' \
+  "$BTLS_DIR/server/btls256/nginx.sh"
+grep -q 'fossils/zlib-1.3.2.tar.gz' "$BTLS_DIR/server/btls256/nginx.sh" \
+  || die "патч URL zlib к nginx.sh эталона не применился — сборка добежит до образа без nginx"
+log "⚠ nginx.sh эталона: URL zlib заменён на fossils (версия та же, 1.3.2) — PROCESS.md §5"
+
 docker image inspect "$GW_IMAGE" >/dev/null 2>&1 \
   || die "образа шлюза $GW_IMAGE нет — соберите: docker build -t $GW_IMAGE ."
 
@@ -101,6 +114,12 @@ log "== сборка эталонных образов (первая — дол�
 build_stand_image btls256
 build_stand_image btls384
 build_stand_image btls512
+
+# Сторож честности сборки: nginx.sh эталона глотает отказы (нет set -e), и образ без
+# nginx выглядит собравшимся — падение уехало бы в compose up с невнятным
+# «no such file or directory». Провал загрузки обязан быть виден ЗДЕСЬ и с причиной.
+docker run --rm btls/btls256 test -x /usr/sbin/nginx \
+  || die "эталон собрался БЕЗ nginx — источник сборки уехал снова? (nginx.sh глотает отказы загрузок; смотреть wget-строки в логе сборки)"
 
 # Дрейф, который нельзя удержать: bee2evp в Dockerfile эталона клонируется без пина.
 bee2evp_sha=$(docker run --rm btls/btls256 git -C /root/bee2evp rev-parse HEAD)
