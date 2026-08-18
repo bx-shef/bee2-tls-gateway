@@ -122,12 +122,23 @@ check("таблица состава §6.2 найдена в PROCESS.md", tbl is
 
 if tbl is not None:
     table = tbl.group(0)
+    # ⚠ Ищем в СВОЕЙ СТРОКЕ таблицы, а не «где-нибудь в таблице». Первая редакция искала
+    # вхождение подстроки — и была МЁРТВОЙ: `openssl-3.5.6` совпадал с именем файла патча
+    # `openssl-3.5.6.patch` в соседней строке, поэтому подмена версии в строке OpenSSL
+    # проверку не роняла. Поймано мутацией при вводе.
+    def row(component):
+        m = re.search(rf"^\| {component} \|([^|]*)\|", table, re.M)
+        return m.group(1) if m else None
+
+    ossl_row = row("OpenSSL")
     check("состав §6.2 называет тот же OpenSSL, что собирает Dockerfile",
-          pins["OPENSSL_TAG"] in table,
-          f"в Dockerfile {pins['OPENSSL_TAG']}, в таблице такого нет")
+          ossl_row is not None and pins["OPENSSL_TAG"] in ossl_row,
+          f"в Dockerfile {pins['OPENSSL_TAG']}, в строке таблицы: {ossl_row!r}")
+
+    nginx_row = row("nginx")
     check("состав §6.2 называет ту же версию nginx",
-          pins["NGINX_VERSION"] in table,
-          f"в Dockerfile {pins['NGINX_VERSION']}, в таблице такого нет")
+          nginx_row is not None and pins["NGINX_VERSION"] in nginx_row,
+          f"в Dockerfile {pins['NGINX_VERSION']}, в строке таблицы: {nginx_row!r}")
     # Коммит bee2evp в таблице сокращён до префикса с многоточием — сверяем префикс.
     m = re.search(r"коммит `([0-9a-f]{6,40})…?`", table)
     check("состав §6.2 называет тот же коммит bee2evp",
