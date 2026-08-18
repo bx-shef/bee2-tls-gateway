@@ -122,7 +122,7 @@ docker image inspect "$GW_IMAGE" >/dev/null 2>&1 \
 # btls256 строится ПЕРВЫМ: btls384/512 в эталоне — FROM btls/btls256.
 build_stand_image() {
   local name="$1"
-  if [ "${STAND_CACHE:-}" = gha ]; then
+  if [ "$name" = btls256 ] && [ "${STAND_CACHE:-}" = gha ]; then
     # Требует прокинутого ACTIONS_RUNTIME_TOKEN (шаг ghaction-github-runtime в ci.yml):
     # сырой buildx из run-шага сам его не достаёт. ignore-error на cache-to несущий:
     # на форк-PR токен read-only, запись в кэш запрещена — без ignore-error провал
@@ -132,6 +132,13 @@ build_stand_image() {
       --cache-to "type=gha,mode=max,scope=stand-$name,ignore-error=true" \
       -t "btls/$name" "$BTLS_DIR/server/$name"
   else
+    # ⚠ btls384/512 — ВСЕГДА классическим docker build, даже в CI, и это несущее:
+    # buildx с container-driver разрешает FROM через РЕЕСТР, а не локальный демон, и
+    # `FROM btls/btls256` из Dockerfile эталона тянул docker.io/btls/btls256:latest —
+    # чужой незапиненный образ с Docker Hub вместо только что собранного из запиненного
+    # checkout (найдено по логу живого прогона: builder скачал 874 МБ «CACHED»-базы).
+    # Классический builder берёт локальный образ; кэшировать в 384/512 нечего —
+    # это две COPY-строки поверх btls256.
     docker build -t "btls/$name" "$BTLS_DIR/server/$name"
   fi
 }
@@ -139,6 +146,15 @@ log "== сборка эталонных образов (первая — дол�
 build_stand_image btls256
 build_stand_image btls384
 build_stand_image btls512
+
+# Сторож происхождения: базовый слой btls384/512 обязан совпадать с нашим btls256 —
+# иначе «три уровня одного стека» тихо превращаются в «наш 256 и чужие 384/512 с Hub».
+base256=$(docker image inspect --format '{{index .RootFS.Layers 0}}' btls/btls256)
+for n in btls384 btls512; do
+  [ "$(docker image inspect --format '{{index .RootFS.Layers 0}}' "btls/$n")" = "$base256" ] \
+    || die "$n собран НЕ от нашего btls256 (базовый слой другой) — FROM разрешился в чужой образ"
+done
+log "ok   btls384/512 собраны от нашего btls256, не от постороннего образа"
 
 # Сторож честности сборки: nginx.sh эталона глотает отказы (нет set -e), и образ без
 # nginx выглядит собравшимся — падение уехало бы в compose up с невнятным
