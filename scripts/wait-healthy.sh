@@ -43,5 +43,10 @@ done
 
 [ "$soft" = 1 ] && exit 0
 echo "FAIL: контейнер $container не стал healthy" >&2
+# Вывод последних проб healthcheck несущий: процесс, который пишет логи в файлы
+# (nginx стенда), оставляет docker logs пустым, и без этой строки отказ выглядел бы
+# беспричинным — так и вышло на первом живом прогоне стенда.
+docker inspect -f '{{range .State.Health.Log}}probe exit={{.ExitCode}}: {{.Output}}{{end}}' \
+  "$container" 2>/dev/null | tail -5 >&2
 docker logs "$container" 2>&1 | tail -30 >&2
 exit 1
