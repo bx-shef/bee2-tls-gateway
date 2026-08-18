@@ -11,7 +11,10 @@
 #     говорит только TLS 1.2 — готовый негативный сценарий «несогласуемый набор»;
 #   - доверие не наследуется: со штатной связкой ГосСУОК вместо сертификата стенда
 #     тот же порт обязан дать 502 с verify-ошибкой в логе — иначе зелёная матрица
-#     не отличала бы работающую проверку цепочки от выключенной.
+#     не отличала бы работающую проверку цепочки от выключенной;
+#   - extended_master_secret (#80, A1, требование ОАЦ от 12.05.2025) предлагается и
+#     согласуется с эталоном на обязательном наборе — отдельная проба, гоняется и
+#     под фильтром --only.
 #
 # ⚠ Эталон клонируется на ЗАПИНЕННЫЙ коммит из stand/btls.pin: стенд — доказательная
 # база экспертизы, и дрейф незапиненного master тихо менял бы то, против чего мы
@@ -35,12 +38,34 @@ BTLS_DIR="${BTLS_DIR:-${TMPDIR:-/tmp}/btls-stand-checkout}"
 export BTLS_DIR
 
 keep=0
-for arg in "$@"; do
-  case "$arg" in
+only=''
+while [ $# -gt 0 ]; do
+  case "$1" in
     --keep) keep=1 ;;
-    *) echo "check-stand.sh: неизвестный аргумент $arg" >&2; exit 2 ;;
+    # --only УРОВЕНЬ[:ПОРТ][,…] — гонять только названные клетки матрицы (например,
+    # `--only 256:8443` или `--only 256,384:8444`). Для итераций по одной клетке —
+    # разработка A1 гоняла бы иначе все 18+1 запусков шлюза на каждую пробу патча.
+    # Пробы стенда и клетка «чужой корень» при фильтре пропускаются: они — свойство
+    # ПОЛНОЙ матрицы, и их отсутствие честно видно в итоговой строке. EMS-проба (#80)
+    # гоняется и под фильтром — см. её блок.
+    --only) only="${2:?check-stand.sh: --only требует УРОВЕНЬ[:ПОРТ][,…]}"; shift ;;
+    *) echo "check-stand.sh: неизвестный аргумент $1" >&2; exit 2 ;;
   esac
+  shift
 done
+
+# only_match УРОВЕНЬ ПОРТ — попадает ли клетка в фильтр --only (пустой фильтр = все).
+only_match() {
+  [ -z "$only" ] && return 0
+  local tok _toks
+  IFS=',' read -ra _toks <<<"$only"
+  for tok in "${_toks[@]}"; do
+    case "$tok" in
+      "$1"|"$1:$2") return 0 ;;
+    esac
+  done
+  return 1
+}
 
 log()  { printf '%s\n' "$*"; }
 die()  { printf 'FAIL %s\n' "$*" >&2; exit 1; }
@@ -97,7 +122,7 @@ docker image inspect "$GW_IMAGE" >/dev/null 2>&1 \
 # btls256 строится ПЕРВЫМ: btls384/512 в эталоне — FROM btls/btls256.
 build_stand_image() {
   local name="$1"
-  if [ "${STAND_CACHE:-}" = gha ]; then
+  if [ "$name" = btls256 ] && [ "${STAND_CACHE:-}" = gha ]; then
     # Требует прокинутого ACTIONS_RUNTIME_TOKEN (шаг ghaction-github-runtime в ci.yml):
     # сырой buildx из run-шага сам его не достаёт. ignore-error на cache-to несущий:
     # на форк-PR токен read-only, запись в кэш запрещена — без ignore-error провал
@@ -107,6 +132,13 @@ build_stand_image() {
       --cache-to "type=gha,mode=max,scope=stand-$name,ignore-error=true" \
       -t "btls/$name" "$BTLS_DIR/server/$name"
   else
+    # ⚠ btls384/512 — ВСЕГДА классическим docker build, даже в CI, и это несущее:
+    # buildx с container-driver разрешает FROM через РЕЕСТР, а не локальный демон, и
+    # `FROM btls/btls256` из Dockerfile эталона тянул docker.io/btls/btls256:latest —
+    # чужой незапиненный образ с Docker Hub вместо только что собранного из запиненного
+    # checkout (найдено по логу живого прогона: builder скачал 874 МБ «CACHED»-базы).
+    # Классический builder берёт локальный образ; кэшировать в 384/512 нечего —
+    # это две COPY-строки поверх btls256.
     docker build -t "btls/$name" "$BTLS_DIR/server/$name"
   fi
 }
@@ -114,6 +146,15 @@ log "== сборка эталонных образов (первая — дол�
 build_stand_image btls256
 build_stand_image btls384
 build_stand_image btls512
+
+# Сторож происхождения: базовый слой btls384/512 обязан совпадать с нашим btls256 —
+# иначе «три уровня одного стека» тихо превращаются в «наш 256 и чужие 384/512 с Hub».
+base256=$(docker image inspect --format '{{index .RootFS.Layers 0}}' btls/btls256)
+for n in btls384 btls512; do
+  [ "$(docker image inspect --format '{{index .RootFS.Layers 0}}' "btls/$n")" = "$base256" ] \
+    || die "$n собран НЕ от нашего btls256 (базовый слой другой) — FROM разрешился в чужой образ"
+done
+log "ok   btls384/512 собраны от нашего btls256, не от постороннего образа"
 
 # Сторож честности сборки: nginx.sh эталона глотает отказы (нет set -e), и образ без
 # nginx выглядит собравшимся — падение уехало бы в compose up с невнятным
@@ -154,13 +195,15 @@ done
 # вот ключ и сертификат у каждого свои — битый PEM уровня всплыл бы иначе глубоко в
 # матрице неотличимо от прочих 502.
 s_probe() {
-  # s_probe СЕТЬ ПОРТ [доп. аргументы s_client...]
+  # s_probe СЕТЬ ПОРТ [доп. аргументы s_client...] — -brief подаёт вызывающий: пробе
+  # EMS нужен ПОЛНЫЙ вывод (блок SSL-Session), который -brief подавляет.
   local net="$1" port="$2"; shift 2
   docker run --rm --network "$net" --entrypoint /opt/btls/bin/openssl \
-    "$GW_IMAGE" s_client -connect "www.example.org:$port" -brief "$@" </dev/null 2>&1 || true
+    "$GW_IMAGE" s_client -connect "www.example.org:$port" "$@" </dev/null 2>&1 || true
 }
+if [ -z "$only" ]; then
 for s in 256 384 512; do
-  probe=$(s_probe "btls-stand_s$s" 8443 -tls1_2 -cipher DHE-BIGN-WITH-BELT-CTR-MAC-HBELT)
+  probe=$(s_probe "btls-stand_s$s" 8443 -brief -tls1_2 -cipher DHE-BIGN-WITH-BELT-CTR-MAC-HBELT)
   grep -q 'Ciphersuite: DHE-BIGN-WITH-BELT-CTR-MAC-HBELT' <<<"$probe" \
     || { printf '%s\n' "$probe" >&2; die "btls$s не согласовал обязательный набор прямой пробой — матрица бессмысленна"; }
 done
@@ -171,11 +214,54 @@ log "ok   стенд говорит BTLS на всех трёх уровнях, 
 # TLS». Любой TLS-ответ годится — согласование (если наш стек знает их наборы) или
 # alert: оба исхода отличают живой TLS 1.3-вход от порта, за которым ничего нет.
 for port in 8447 8448; do
-  probe=$(s_probe btls-stand_s256 "$port" -tls1_3)
+  probe=$(s_probe btls-stand_s256 "$port" -brief -tls1_3)
   grep -Eq 'Ciphersuite:|alert|handshake failure|wrong version' <<<"$probe" \
     || { printf '%s\n' "$probe" >&2; die "порт $port не ответил на уровне TLS — 502 матрицы был бы приписан несогласуемости зря"; }
 done
 log "ok   TLS 1.3-порты живы — их 502 в матрице означает несогласуемость, не мёртвый порт"
+else
+  log "⚠ фильтр --only $only: пробы стенда и клетка «чужой корень» пропущены — это свойства полной матрицы"
+fi
+
+# ---- extended_master_secret (#80, A1) ----------------------------------------------
+# ⚠ НЕ под фильтром --only: флаг заведён ради итераций A1, и выключать им саму
+# EMS-пробу значило бы дать разработчику зелёный лог без единой проверки того, что он
+# правит. Проба дешёвая — два s_client, шлюзы не поднимает.
+# Требование ОАЦ от 12.05.2025: RFC 7627 либо иной механизм защиты от Triple Handshake;
+# проверяется при испытаниях (CERTIFICATION.md §0.4). Патч BTLS механизм EMS не трогает
+# (проверено по openssl-3.5.6.patch: правки extensions — ECC-гейт на BIGN в clnt и гейт
+# ETM для BELTCTR в srvr, оба к EMS отношения не имеют; t1_enc.c с session_hash патчем
+# не задет), но «не трогает» — не доказательство: здесь оно снимается ЖИВЬЁМ, на
+# обязательном наборе против эталона. Два независимых свидетельства:
+#   - -tlsextdebug печатает расширения ServerHello: эталон ВЕРНУЛ extension 23 —
+#     протокольный факт согласования;
+#   - строка сессии «Extended master secret: yes» — итог, вошедший в ключевой материал.
+# ems_dump — вывод пробы для диагностики провала БЕЗ строки Master-Key: полный
+# s_client печатает master secret сессии, а правило «ключи не логируем... ни в вывод
+# CI» написано без исключений «кроме оснастки». Для диагноза EMS он и не нужен.
+ems_dump() { grep -v 'Master-Key:' <<<"$1" >&2; }
+ems=$(s_probe btls-stand_s256 8443 -tlsextdebug -tls1_2 -cipher DHE-BIGN-WITH-BELT-CTR-MAC-HBELT)
+grep -qi 'server extension "extended master secret"' <<<"$ems" \
+  || { ems_dump "$ems"; die "эталон не вернул extended_master_secret в ServerHello — RFC 7627 не согласован (блокер испытаний, #80)"; }
+grep -q 'Extended master secret: yes' <<<"$ems" \
+  || { ems_dump "$ems"; die "сессия без extended master secret — расширение вернулось, но в ключевой материал не вошло (#80)"; }
+# Проверка обязана уметь краснеть, и негатив -no_ems сторожит ОБЕ стороны:
+#   - строка «no» обязана появиться — иначе грепу «no» не с чем работать;
+#   - позитивные паттерны обязаны ИСЧЕЗНУТЬ — иначе ослабленный позитивный греп
+#     (скажем, без слова yes) оставался бы зелёным и при отсутствии расширения.
+#     Это и есть мутационный негатив для позитивных грепов, а не только для своего.
+# -tlsextdebug и здесь несущий: без него строка server extension отсутствовала бы
+# тривиально — потому что не печатается, а не потому что расширение не согласовано.
+ems_off=$(s_probe btls-stand_s256 8443 -tlsextdebug -no_ems -tls1_2 -cipher DHE-BIGN-WITH-BELT-CTR-MAC-HBELT)
+grep -q 'Extended master secret: no' <<<"$ems_off" \
+  || { ems_dump "$ems_off"; die "с -no_ems сессия не сказала «no» — проба EMS не отличает наличие от отсутствия"; }
+if grep -qi 'server extension "extended master secret"' <<<"$ems_off"; then
+  ems_dump "$ems_off"; die "с -no_ems эталон «вернул» расширение — греп ServerHello ослаблен и не отличает наличие от отсутствия"
+fi
+if grep -q 'Extended master secret: yes' <<<"$ems_off"; then
+  ems_dump "$ems_off"; die "с -no_ems сессия «сказала yes» — позитивный греп ослаблен и не отличает наличие от отсутствия"
+fi
+log "ok   extended_master_secret предлагается и согласуется с эталоном (RFC 7627); проба краснеет, если -no_ems не даёт «no»"
 
 # ---- матрица: три уровня стойкости × шесть портов ----------------------------------
 declare -A EXPECT=(
@@ -207,6 +293,7 @@ hport=17300
 for s in 256 384 512; do
   for port in 8443 8444 8445 8446 8447 8448; do
     hport=$((hport + 1))
+    only_match "$s" "$port" || continue
     name="gw-stand-$s-$port"
     run_gw "$name" "btls-stand_s$s" "$port" "$hport" \
       -v "$BTLS_DIR/server/btls$s/cert$s.pem:/etc/crypto-gw/ca/gossuok-bundle.pem:ro"
@@ -241,6 +328,7 @@ done
 # ---- доверие не наследуется: штатная связка ГосСУОК против стенда ------------------
 # Без этого отрицательного случая матрица выше не стоит ничего: сними кто-нибудь
 # `proxy_ssl_verify on` — все 12 положительных клеток остались бы зелёными.
+if [ -z "$only" ]; then
 hport=$((hport + 1))
 # GW_ERROR_LOG_LEVEL=error несущий: умолчание crit НАМЕРЕННО душит [error]-строки nginx
 # (там полная строка запроса с идентификаторами — entrypoint.sh об этом прямо), а
@@ -258,6 +346,7 @@ else
   fails=$((fails + 1))
   printf '%s\n' "$bad_log" | tail -15 >&2
 fi
+fi
 
 # ---- итог --------------------------------------------------------------------------
 log ""
@@ -267,4 +356,11 @@ log ""
 if [ "$fails" -gt 0 ]; then
   die "клеток с расхождением: $fails"
 fi
-log "все клетки матрицы сходятся: 12 согласований, 6 отказов TLS 1.3, отказ по доверию"
+if [ -n "$only" ]; then
+  # Пустое пересечение — ошибка вызова, а не «всё сошлось»: зелёный на нуле клеток
+  # был бы худшим исходом фильтра.
+  [ "${#rows[@]}" -gt 0 ] || die "фильтр --only $only не совпал ни с одной клеткой (уровни 256/384/512, порты 8443–8448)"
+  log "клетки по фильтру --only $only сходятся (${#rows[@]} шт.); полная матрица НЕ гонялась"
+else
+  log "все клетки матрицы сходятся: 12 согласований, 6 отказов TLS 1.3, отказ по доверию; EMS согласован"
+fi
