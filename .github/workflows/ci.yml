@@ -162,7 +162,9 @@ jobs:
     runs-on: ubuntu-latest
     # Сборка криптостека из исходников идёт долго; отдельный job, чтобы быстрые проверки
     # отдавали результат, не дожидаясь её.
-    timeout-minutes: 45
+    # 75, а не 45: шаг стенда (A6) при ХОЛОДНОМ кэше собирает второй bee2evp+OpenSSL
+    # (~20 минут); с тёплым кэжем buildx стенд укладывается в минуты, и запас не тратится.
+    timeout-minutes: 75
     permissions:
       contents: read
       # Нужно только для публикации в GHCR на шаге ниже; на pull request не используется,
@@ -174,6 +176,15 @@ jobs:
 
       - name: Buildx
         uses: docker/setup-buildx-action@v4
+
+      # Прокидывает ACTIONS_RUNTIME_TOKEN/ACTIONS_CACHE_URL в окружение шагов: без этого
+      # «сырой» `docker buildx build --cache-to type=gha` из run-шага (сборка стенда в
+      # check-stand.sh) не может авторизоваться в кэше и валит сборку на экспорте.
+      # Шагу «Сборка образа» это не нужно — docker/build-push-action достаёт токен сам,
+      # внутри своего процесса; run-шагам — не достаёт никто, это документированное
+      # требование BuildKit для inline-вызовов.
+      - name: Runtime для gha-кэша в run-шагах
+        uses: crazy-max/ghaction-github-runtime@v4
 
       # Сборка доказывает, что криптостек компилируется, цепочка сертификатов проверяется
       # и атрибуция лицензий доехала — четыре гейта живут внутри Dockerfile. Она НЕ
@@ -198,13 +209,9 @@ jobs:
           docker run -d --name gw-smoke -p 127.0.0.1:1080:1080 \
             -e GW_UPSTREAM_HOST=127.0.0.1 -e GW_UPSTREAM_PORT=9345 \
             bee2-tls-gateway:ci
-          for _ in $(seq 1 20); do
-            [ "$(docker inspect -f '{{.State.Health.Status}}' gw-smoke)" = healthy ] && break
-            sleep 2
-          done
+          bash scripts/wait-healthy.sh gw-smoke
           smoke_log=$(docker logs gw-smoke 2>&1)
           printf '%s\n' "$smoke_log"
-          test "$(docker inspect -f '{{.State.Health.Status}}' gw-smoke)" = healthy
           # ---- счастливый путь самотеста (#42) --------------------------------------
           # Обе строки успеха README обещает оператору как ВИДИМЫЙ признак того, что
           # самотест прошёл, — значит это контракт, а не украшение лога. До #42 успех
@@ -309,10 +316,9 @@ jobs:
             -e GW_UPSTREAM_HOST=127.0.0.1 -e GW_UPSTREAM_PORT=9345 \
             -e GW_NO_SUCH_SETTING=1 \
             bee2-tls-gateway:ci >/dev/null
-          for _ in $(seq 1 20); do
-            [ "$(docker inspect -f '{{.State.Health.Status}}' gw-unknown)" = healthy ] && break
-            sleep 2
-          done
+          # --soft: «не стал healthy» здесь — самостоятельный исход, его утверждает
+          # проверка ниже своей формулировкой («уронила контейнер, а должна предупредить»).
+          bash scripts/wait-healthy.sh --soft gw-unknown
           unknown_log=$(docker logs gw-unknown 2>&1)
           printf '%s\n' "$unknown_log" | head -5
           healthy_unknown=$(docker inspect -f '{{.State.Health.Status}}' gw-unknown)
@@ -330,12 +336,8 @@ jobs:
             -e GW_UPSTREAM_HOST=127.0.0.1 -e GW_UPSTREAM_PORT=9345 \
             -e GW_ALLOW='GET /open-banking-dcr/' \
             bee2-tls-gateway:ci
-          for _ in $(seq 1 20); do
-            [ "$(docker inspect -f '{{.State.Health.Status}}' gw-allow)" = healthy ] && break
-            sleep 2
-          done
+          bash scripts/wait-healthy.sh gw-allow
           docker logs gw-allow
-          test "$(docker inspect -f '{{.State.Health.Status}}' gw-allow)" = healthy
           code2() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
           # Новый путь разрешён. Утверждаем КОНКРЕТНЫЙ код, а не «не 404»: `!= 404` проходит
           # и на curl-овом 000, то есть остался бы зелёным на шлюзе, который вообще молчит.
@@ -361,12 +363,8 @@ jobs:
             -e GW_UPSTREAM_HOST=127.0.0.1 -e GW_UPSTREAM_PORT=9345 \
             -e GW_ALLOW='' \
             bee2-tls-gateway:ci
-          for _ in $(seq 1 20); do
-            [ "$(docker inspect -f '{{.State.Health.Status}}' gw-deny)" = healthy ] && break
-            sleep 2
-          done
+          bash scripts/wait-healthy.sh gw-deny
           docker logs gw-deny
-          test "$(docker inspect -f '{{.State.Health.Status}}' gw-deny)" = healthy
           code3() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
           test "$(code3 http://127.0.0.1:1082/healthz)" = 200
           test "$(code3 http://127.0.0.1:1082/open-banking/v1.0/accounts)" = 404
@@ -731,15 +729,12 @@ jobs:
             -e GW_UPSTREAM_HOST=127.0.0.1 -e GW_UPSTREAM_PORT=9345 \
             -v /tmp/rot-bundle.pem:/etc/crypto-gw/ca/gossuok-bundle.pem:ro \
             bee2-tls-gateway:ci
-          for _ in $(seq 1 20); do
-            [ "$(docker inspect -f '{{.State.Health.Status}}' gw-rot)" = healthy ] && break
-            sleep 2
-          done
+          # ⚠ Обе строки, которые ищутся ниже, печатаются ДО `nginx -t`, поэтому ожидание
+          # обязано упасть на не-healthy контейнере — иначе шаг прошёл бы и на контейнере,
+          # который не поднялся по другой причине. wait-healthy.sh это и делает.
+          bash scripts/wait-healthy.sh gw-rot
           rot_log=$(docker logs gw-rot 2>&1)
           printf '%s\n' "$rot_log"
-          # ⚠ Обе строки ниже печатаются ДО `nginx -t`, поэтому без этой проверки шаг
-          # прошёл бы и на контейнере, который не поднялся по другой причине.
-          test "$(docker inspect -f '{{.State.Health.Status}}' gw-rot)" = healthy
           docker rm -f gw-rot >/dev/null
 
           # Том действительно подменён — иначе шаг проверял бы штатную связку и проходил
@@ -759,10 +754,9 @@ jobs:
             -e GW_UPSTREAM_HOST=127.0.0.1 -e GW_UPSTREAM_PORT=9345 \
             -v /tmp/rot.crt:/etc/crypto-gw/ca/gossuok-bundle.pem:ro \
             bee2-tls-gateway:ci
-          for _ in $(seq 1 20); do
-            [ "$(docker inspect -f '{{.State.Health.Status}}' gw-rot-bad)" = healthy ] && break
-            sleep 2
-          done
+          # --soft: негодная связка даёт предупреждение, не крах — healthy тут не предмет
+          # проверки, предмет — ветка ВНИМАНИЕ в логе, и её утверждает grep ниже.
+          bash scripts/wait-healthy.sh --soft gw-rot-bad
           bad_log=$(docker logs gw-rot-bad 2>&1)
           printf '%s\n' "$bad_log"
           docker rm -f gw-rot-bad >/dev/null
@@ -853,19 +847,9 @@ jobs:
             docker logs "$1" 2>&1 | tail -20 >&2
             exit 1
           }
-          # ⚠ Цикл ожидания ОБЯЗАН кончаться проверкой, а не истечением. Без неё
-          # не поднявшийся контейнер выглядит как провалившееся рукопожатие: шаг красный,
-          # но показывает пальцем на TLS, которого не было.
-          wait_healthy() {
-            for _ in $(seq 1 20); do
-              [ "$(docker inspect -f '{{.State.Health.Status}}' "$1")" = healthy ] && return 0
-              sleep 2
-            done
-            echo "FAIL: контейнер $1 не стал healthy" >&2
-            docker logs "$1" 2>&1 | tail -30 >&2
-            exit 1
-          }
-
+          # Ожидание healthy — общим помощником scripts/wait-healthy.sh (#62): цикл,
+          # кончающийся проверкой, а не истечением, иначе не поднявшийся контейнер
+          # выглядит как провалившееся рукопожатие.
           docker network create btlsnet >/dev/null
           # ⚠ Имя апстрима в сети = SAN листа: `proxy_ssl_verify on` сверяет ИМЯ, а не
           # только цепочку. Один апстрим обслуживает оба случая — вторая его копия
@@ -888,7 +872,7 @@ jobs:
             -e GW_UPSTREAM_HOST=btls-probe-upstream -e GW_UPSTREAM_PORT=9345 \
             -v "$PKI/bundle-two.pem:/etc/crypto-gw/ca/gossuok-bundle.pem:ro" \
             bee2-tls-gateway:ci >/dev/null
-          wait_healthy gw-live
+          bash scripts/wait-healthy.sh gw-live
           code=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' \
             http://127.0.0.1:1094/open-banking/v1.0/ping || true)
           gw_log=$(docker logs gw-live 2>&1)
@@ -917,7 +901,7 @@ jobs:
             -e GW_UPSTREAM_HOST=btls-probe-upstream -e GW_UPSTREAM_PORT=9345 \
             -v "$PKI/second/ca.crt:/etc/crypto-gw/ca/gossuok-bundle.pem:ro" \
             bee2-tls-gateway:ci >/dev/null
-          wait_healthy gw-live-bad
+          bash scripts/wait-healthy.sh gw-live-bad
           wait_listen btls-upstream
           bad_code=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' \
             http://127.0.0.1:1095/open-banking/v1.0/ping || true)
@@ -939,6 +923,42 @@ jobs:
           docker run --rm --entrypoint bash \
             -v "$PWD/scripts:/scripts:ro" \
             bee2-tls-gateway:ci /scripts/check-crypto.sh
+
+      # Сторож сторожа для нового помощника (#62): ожидание, которое не умеет краснеть,
+      # неотличимо от работающего. Контейнер с заведомо провальным healthcheck обязан
+      # уронить wait-healthy.sh без --soft и НЕ уронить с ним. Дёшево: busybox, ~10 секунд.
+      - name: wait-healthy.sh краснеет на unhealthy и молчит с --soft
+        run: |
+          set -euo pipefail
+          docker run -d --name wh-probe --health-cmd false \
+            --health-interval 1s --health-retries 2 --health-start-period 0s \
+            busybox sleep 60 >/dev/null
+          if bash scripts/wait-healthy.sh --tries 3 wh-probe 2>/dev/null; then
+            echo 'FAIL: wait-healthy.sh не упал на заведомо unhealthy контейнере' >&2
+            exit 1
+          fi
+          bash scripts/wait-healthy.sh --tries 3 --soft wh-probe \
+            || { echo 'FAIL: --soft обязан выйти нулём' >&2; exit 1; }
+          docker rm -f wh-probe >/dev/null
+          echo 'ok: помощник ожидания краснеет на своей поломке и молчит по --soft'
+
+      # ---- эталонный стенд Приложения Г (#82, A6) ------------------------------------
+      # Та самая среда, в которой изделие будут испытывать (МИ.10165.10.01, Приложение Г):
+      # серверы bcrypto/btls на нашем же стеке. Матрица — три уровня стойкости × шесть
+      # портов (по одному криптонабору на порт, 8443 — обязательный 0xFF15), плюс два
+      # отрицательных исхода: TLS 1.3-only порты не согласуются, чужой корень отвергается.
+      # Живёт в scripts/check-stand.sh — тот же скрипт гоняется локально (PROCESS.md §4).
+      #
+      # ⚠ Эталон запинен коммитом (stand/btls.pin): это первая живая внешняя зависимость
+      # CI, и одновременно доказательная база экспертизы — дрейф master тихо менял бы то,
+      # против чего мы «прошли». bee2evp ВНУТРИ эталонного Dockerfile пина не имеет; этот
+      # дрейф не удержать, не трогая эталон, поэтому скрипт печатает фактический коммит.
+      #
+      # ⚠ STAND_CACHE=gha: первая сборка стенда — ~20 минут (bee2evp+OpenSSL из
+      # исходников), с кэшем buildx — минуты; слои стенда от нашего дифа не зависят,
+      # поэтому кэш попадает почти всегда.
+      - name: Эталонный стенд Приложения Г — матрица наборов (A6)
+        run: STAND_CACHE=gha bash scripts/check-stand.sh
 
       # ---- публикация в GHCR (#14) -------------------------------------------------
       # Только с main и только после смоука. Публикуется ТОТ ЖЕ образ, который сейчас

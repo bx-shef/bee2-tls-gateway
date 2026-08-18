@@ -1,0 +1,121 @@
+# Эталонный стенд Приложения Г МИ.10165.10.01 (#82): серверы bcrypto/btls трёх уровней
+# стойкости + эхо-бэкенд для /check_server. Поднимается скриптом scripts/check-stand.sh
+# (он же клонирует эталон на запиненный коммит из stand/btls.pin и экспортирует BTLS_DIR);
+# руками — только для отладки, см. docs/PROCESS.md §4.
+#
+# ⚠ Стенд — испытательная оснастка, НЕ образец продукта: приватные ключи лежат в образах
+# открытым текстом, bee2evp внутри клонируется без пина (дрейф печатает check-stand.sh),
+# самотеста нет. Сравнивать со шлюзом только криптостек и параметры TLS (задача A6.1).
+#
+# ⚠ Каждый уровень стойкости живёт в СВОЕЙ сети с алиасом www.example.org (CN самоподписанного
+# сертификата стенда; SAN в нём нет, поэтому проверка имени идёт по CN). Общая сеть дала бы
+# один алиас трём контейнерам сразу — DNS вернул бы любой из них, и матрица проверяла бы
+# не тот уровень, который назвала.
+#
+# ⚠ Порты наружу не публикуются: родной compose эталона отдаёт 80/443/8443-8448 всем трём
+# контейнерам сразу и потому может держать поднятым только один; шлюз ходит в стенд по
+# внутренней сети, публикуется только сам шлюз (это делает check-stand.sh).
+#
+# ⚠ command переопределён: в эталоне все сервисы стартуют как `tail -f /dev/null`, а nginx
+# и flask авторы запускают руками через exec. Для CI это неприменимо.
+name: btls-stand
+
+services:
+  echo:
+    image: python:3.12-slim
+    container_name: stand-echo
+    command: ["python3", "/echo-backend.py"]
+    volumes:
+      - ./echo-backend.py:/echo-backend.py:ro
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; socket.create_connection(('127.0.0.1', 5000), 2).close()"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    networks:
+      s256:
+        aliases: [flask-app]
+      s384:
+        aliases: [flask-app]
+      s512:
+        aliases: [flask-app]
+
+  btls256:
+    build:
+      context: ${BTLS_DIR:?запустите через scripts/check-stand.sh — он клонирует эталон и задаёт BTLS_DIR}/server/btls256
+    image: btls/btls256
+    container_name: stand-btls256
+    command: ["/usr/sbin/nginx", "-g", "daemon off;"]
+    # nginx резолвит статический proxy_pass на flask-app ОДИН раз при старте: без
+    # дождавшегося echo он падает с «host not found in upstream». Эталону это не грозит
+    # только потому, что там nginx запускают руками, с запасом времени.
+    depends_on:
+      echo:
+        condition: service_healthy
+    healthcheck:
+      # Все шесть портов, а не один 8443: healthy по одному порту молча пропускал бы
+      # контейнер с несобравшимся TLS 1.3-вхостом, и 502 в матрице читался бы как
+      # «несогласуемо», хотя порт просто мёртв.
+      test: ["CMD", "bash", "-c", "for p in 8443 8444 8445 8446 8447 8448; do exec 3<>/dev/tcp/127.0.0.1/$$p || exit 1; exec 3<&-; done"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+    networks:
+      s256:
+        aliases: [www.example.org]
+
+  # btls384/512 собираются FROM btls/btls256 (так в эталоне: меняются только ключ и
+  # сертификат), поэтому check-stand.sh строит btls256 ПЕРВЫМ — compose порядок сборки
+  # не гарантирует.
+  btls384:
+    build:
+      context: ${BTLS_DIR:?запустите через scripts/check-stand.sh — он клонирует эталон и задаёт BTLS_DIR}/server/btls384
+    image: btls/btls384
+    container_name: stand-btls384
+    command: ["/usr/sbin/nginx", "-g", "daemon off;"]
+    # nginx резолвит статический proxy_pass на flask-app ОДИН раз при старте: без
+    # дождавшегося echo он падает с «host not found in upstream». Эталону это не грозит
+    # только потому, что там nginx запускают руками, с запасом времени.
+    depends_on:
+      echo:
+        condition: service_healthy
+    healthcheck:
+      # Все шесть портов, а не один 8443: healthy по одному порту молча пропускал бы
+      # контейнер с несобравшимся TLS 1.3-вхостом, и 502 в матрице читался бы как
+      # «несогласуемо», хотя порт просто мёртв.
+      test: ["CMD", "bash", "-c", "for p in 8443 8444 8445 8446 8447 8448; do exec 3<>/dev/tcp/127.0.0.1/$$p || exit 1; exec 3<&-; done"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+    networks:
+      s384:
+        aliases: [www.example.org]
+
+  btls512:
+    build:
+      context: ${BTLS_DIR:?запустите через scripts/check-stand.sh — он клонирует эталон и задаёт BTLS_DIR}/server/btls512
+    image: btls/btls512
+    container_name: stand-btls512
+    command: ["/usr/sbin/nginx", "-g", "daemon off;"]
+    # nginx резолвит статический proxy_pass на flask-app ОДИН раз при старте: без
+    # дождавшегося echo он падает с «host not found in upstream». Эталону это не грозит
+    # только потому, что там nginx запускают руками, с запасом времени.
+    depends_on:
+      echo:
+        condition: service_healthy
+    healthcheck:
+      # Все шесть портов, а не один 8443: healthy по одному порту молча пропускал бы
+      # контейнер с несобравшимся TLS 1.3-вхостом, и 502 в матрице читался бы как
+      # «несогласуемо», хотя порт просто мёртв.
+      test: ["CMD", "bash", "-c", "for p in 8443 8444 8445 8446 8447 8448; do exec 3<>/dev/tcp/127.0.0.1/$$p || exit 1; exec 3<&-; done"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+    networks:
+      s512:
+        aliases: [www.example.org]
+
+networks:
+  s256: {}
+  s384: {}
+  s512: {}
