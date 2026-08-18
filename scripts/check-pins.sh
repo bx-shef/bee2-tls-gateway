@@ -12,7 +12,8 @@
 # что-либо говорить об образе, потому что проверять будет другую версию криптостека.
 #
 # ⚠ ЧЕГО ЭТОТ СКРИПТ НАМЕРЕННО НЕ ДЕЛАЕТ. Он не сверяет версии, упомянутые в документации
-# прозой. В `PROCESS.md` законно живут исторические упоминания («1.28.0 нёс CVE-…»), и
+# прозой — КРОМЕ одной таблицы (см. проверку 4 ниже: `PROCESS.md` §6.2 объявляет состав
+# изделия как ТЕКУЩИЙ факт, её читает эксперт, и разъехаться ей нельзя). В `PROCESS.md` законно живут исторические упоминания («1.28.0 нёс CVE-…»), и
 # проверка «все упоминания версии равны текущему пину» краснела бы на правдивом тексте.
 # Проверка, которая врёт про исправный репозиторий, отключается первой — а вместе с ней
 # отключается и та её часть, которая была полезной.
@@ -25,18 +26,20 @@ cd "$(dirname "$0")/.."
 
 DOCKERFILE=Dockerfile
 CRYPTO=scripts/check-crypto.sh
+PROCESS=docs/PROCESS.md
 
-for f in "$DOCKERFILE" "$CRYPTO"; do
+for f in "$DOCKERFILE" "$CRYPTO" "$PROCESS"; do
   [ -r "$f" ] || { echo "FAIL нет файла $f" >&2; exit 1; }
 done
 
-DOCKERFILE="$DOCKERFILE" CRYPTO="$CRYPTO" python3 - <<'PY'
+DOCKERFILE="$DOCKERFILE" CRYPTO="$CRYPTO" PROCESS="$PROCESS" python3 - <<'PY'
 import os
 import re
 import sys
 
 dockerfile = open(os.environ["DOCKERFILE"], encoding="utf-8").read()
 crypto = open(os.environ["CRYPTO"], encoding="utf-8").read()
+process = open(os.environ["PROCESS"], encoding="utf-8").read()
 
 failures = []
 
@@ -107,6 +110,29 @@ check("OPENSSL_TAG выглядит тегом релиза openssl-X.Y.Z",
 check("NGINX_SHA256 — 64 hex-символа",
       re.fullmatch(r"[0-9a-f]{64}", pins["NGINX_SHA256"]) is not None,
       f"значение: {pins['NGINX_SHA256']}")
+
+# --- 4. Таблица состава изделия в PROCESS.md §6.2 ------------------------------------
+# Эта таблица — не проза и не история: она объявляет, ИЗ ЧЕГО СОБРАНО ИЗДЕЛИЕ СЕЙЧАС, и
+# именно её читает эксперт на анализе документации. Бампнут пин — она молча начнёт врать
+# про состав объекта испытаний, и красным это нигде не станет. Сверяем ТОЛЬКО её строки,
+# не весь файл: в остальном тексте исторические упоминания версий законны (см. шапку).
+tbl = re.search(r"\| Компонент \| Версия / пин \|[\s\S]*?\n\n", process)
+check("таблица состава §6.2 найдена в PROCESS.md", tbl is not None,
+      "заголовок «| Компонент | Версия / пин |» не найден — проверка ниже была бы пустой")
+
+if tbl is not None:
+    table = tbl.group(0)
+    check("состав §6.2 называет тот же OpenSSL, что собирает Dockerfile",
+          pins["OPENSSL_TAG"] in table,
+          f"в Dockerfile {pins['OPENSSL_TAG']}, в таблице такого нет")
+    check("состав §6.2 называет ту же версию nginx",
+          pins["NGINX_VERSION"] in table,
+          f"в Dockerfile {pins['NGINX_VERSION']}, в таблице такого нет")
+    # Коммит bee2evp в таблице сокращён до префикса с многоточием — сверяем префикс.
+    m = re.search(r"коммит `([0-9a-f]{6,40})…?`", table)
+    check("состав §6.2 называет тот же коммит bee2evp",
+          m is not None and pins["BEE2EVP_COMMIT"].startswith(m.group(1)),
+          f"в Dockerfile {pins['BEE2EVP_COMMIT']}, в таблице {m.group(1) if m else 'не разобрался'}")
 
 print()
 for name, value in pins.items():
