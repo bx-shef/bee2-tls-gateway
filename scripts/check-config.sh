@@ -38,12 +38,15 @@ TEMPLATE=nginx.conf.template
 ENTRYPOINT=entrypoint.sh
 README=README.md
 HEALTHCHECK=healthcheck.sh
+# Паспорт сборки живёт в Dockerfile — проверка 12 читает его текстом.
+DOCKERFILE=Dockerfile
 
-for f in "$TEMPLATE" "$ENTRYPOINT" "$README" "$HEALTHCHECK"; do
+for f in "$TEMPLATE" "$ENTRYPOINT" "$README" "$HEALTHCHECK" "$DOCKERFILE"; do
   [ -r "$f" ] || { echo "FAIL нет файла $f" >&2; exit 1; }
 done
 
-TEMPLATE="$TEMPLATE" ENTRYPOINT="$ENTRYPOINT" README="$README" HEALTHCHECK="$HEALTHCHECK" python3 - <<'PY'
+TEMPLATE="$TEMPLATE" ENTRYPOINT="$ENTRYPOINT" README="$README" HEALTHCHECK="$HEALTHCHECK" \
+  DOCKERFILE="$DOCKERFILE" python3 - <<'PY'
 import os
 import re
 import sys
@@ -52,6 +55,7 @@ template = open(os.environ["TEMPLATE"], encoding="utf-8").read()
 entrypoint = open(os.environ["ENTRYPOINT"], encoding="utf-8").read()
 readme = open(os.environ["README"], encoding="utf-8").read()
 healthcheck = open(os.environ["HEALTHCHECK"], encoding="utf-8").read()
+dockerfile = open(os.environ["DOCKERFILE"], encoding="utf-8").read()
 
 # Код entrypoint.sh без строк-комментариев. Нужен проверкам 10: слова `st alg` и `st rng`
 # встречаются в комментариях выше по файлу (замеры времени), и поиск по всему тексту нашёл
@@ -210,6 +214,16 @@ bv = size_bytes(bufb[0]) if len(bufb) == 1 else None
 check("тело ЗАПРОСА не уходит во временный файл (client_max_body_size ≤ client_body_buffer_size)",
       mv is not None and bv is not None and mv != 0 and mv <= bv,
       f"client_max_body_size={maxb}, client_body_buffer_size={bufb}")
+
+# ⚠ Возобновление сессии к апстриму — ЗАПРЕЩЕНО, и это требование нормы, а не вкус.
+#    СТБ 34.101.90-2025 прил. Б (обязательное), Б.4 п. 1: клиенту не следует возобновлять
+#    сеанс, в котором не использовался extended_master_secret. Выборочно это нечем
+#    выразить — у OpenSSL есть только выключатель EMS, не требование, — поэтому
+#    соблюдение принимает единственную доступную форму: не возобновлять вовсе.
+#    Считаем ВСЕ вхождения: переопределение во вложенном location вернуло бы `on` молча.
+reuse = sole_value("proxy_ssl_session_reuse")
+check("сессия к апстриму не возобновляется (СТБ 34.101.90 прил. Б, Б.4 п. 1)",
+      reuse == ["off"], f"вхождения: {reuse}, ожидалось ровно одно со значением off")
 
 # 7. Шифрованный канал к непроверенному собеседнику — не то, ради чего всё делалось: потеря
 #    любой из трёх директив превращает шлюз в нечто, разговаривающее с кем угодно на том IP.
@@ -510,6 +524,90 @@ else:
           not (declared - used), f"лишние в списке: {sorted(declared - used)}")
     check("список возможностей не умалчивает (в коде есть, в списке нет)",
           not (used - declared), f"не названы в списке: {sorted(used - declared)}")
+
+
+# =====================================================================================
+# 12. Паспорт сборки (МИ.10165 п. 6.1.3, задача C4.1)
+# =====================================================================================
+# ⚠ Что здесь можно проверить текстом, а что нельзя — граница названа нарочно.
+#   ТЕКСТОМ: что паспорт вообще собирается, что в него кладутся обязательные поля, что
+#   entrypoint его печатает и что README его описывает (иначе файл в рантайм-образе
+#   нарушает правило «либо описано как возможность, либо не кладётся»).
+#   НЕ ТЕКСТОМ: что паспорт ПОЛОН — совпадает ли он с реальными `ldd` собранных файлов.
+#   Это про двоичные файлы, и живёт двумя гейтами в самом Dockerfile плюс поведенческой
+#   пробой в job `image`. Здесь мы стережём, чтобы гейты не удалили.
+MANIFEST_PATH = "/etc/crypto-gw/build-manifest.txt"
+
+check("паспорт сборки собирается в Dockerfile",
+      MANIFEST_PATH in dockerfile and "ПАСПОРТ СБОРКИ crypto-gw" in dockerfile,
+      f"не нашёл генерацию {MANIFEST_PATH}")
+
+# ⚠ Ищем поля ТОЛЬКО внутри блока генерации, а не по всему Dockerfile — и это правка по
+#   мутации, а не осторожность впрок. Первая редакция искала «компилятор:» во всём файле
+#   и оставалась зелёной, когда поле выкидывали из паспорта: та же строка встречается
+#   ниже, в тексте гейта полноты (`grep -q '^компилятор:'`). То есть проверка про
+#   содержимое паспорта на деле сторожила текст соседней проверки. Поймал харнесс.
+_gen = re.search(r'ПАСПОРТ СБОРКИ crypto-gw(.*?)> /etc/crypto-gw/build-manifest\.txt',
+                 dockerfile, re.S)
+manifest_gen = _gen.group(1) if _gen else ""
+check("блок генерации паспорта выделяется однозначно",
+      bool(manifest_gen),
+      "не нашёл границы блока: от «ПАСПОРТ СБОРКИ crypto-gw» до записи в файл")
+
+# ⚠ Поля паспорта собираются в ДВУХ разных местах, и проверять их одним поиском нельзя.
+#   Версию компилятора и libc знает только сборочная стадия — в рантайм-образе gcc нет
+#   вовсе, поэтому там они снимаются заранее в /build-info и переносятся файлом. Ищем
+#   каждое поле там, где оно реально рождается, иначе проверка снова окажется про текст
+#   соседней проверки, а не про паспорт.
+_tool = re.search(r'mkdir -p /build-info;(.*?)> /build-info/toolchain\.txt', dockerfile, re.S)
+toolchain_gen = _tool.group(1) if _tool else ""
+_ngx = re.search(r'libpcre2-dev:[^\n]*> /build-info/nginx-deps\.txt', dockerfile)
+nginx_deps_gen = _ngx.group(0) if _ngx else ""
+
+check("сборочная стадия снимает паспортные поля до того, как компилятор исчезнет",
+      bool(toolchain_gen) and bool(nginx_deps_gen),
+      "не нашёл генерацию /build-info/toolchain.txt или /build-info/nginx-deps.txt")
+
+# Поля, без которых паспорт не отвечает на п. 6.1.3. Версия компилятора и библиотеки
+# названы нормой прямым текстом — их отсутствие делает документ непроходным.
+for _label, _needle, _where, _wname in [
+    ("версия компилятора", "компилятор:", toolchain_gen, "сборочной стадии"),
+    ("libc сборочной стадии", "libc (сборка):", toolchain_gen, "сборочной стадии"),
+    ("PCRE2, с которой слинкован rewrite", "libpcre2-dev:", nginx_deps_gen, "стадии nginx"),
+    ("фактическая версия OpenSSL", "OpenSSL (факт):", manifest_gen, "блоке паспорта"),
+    ("коммит bee2evp", "bee2evp коммит:", manifest_gen, "блоке паспорта"),
+    ("NEEDED поставляемых файлов", "ldd ", manifest_gen, "блоке паспорта"),
+]:
+    check(f"паспорт несёт: {_label}", _needle in _where,
+          f"не нашёл в {_wname}: {_needle}")
+
+# ⚠ И перенос обязан существовать: поля, снятые в /build-info, попадают в паспорт только
+#   через `cat`. Убери его — сторожа выше останутся зелёными, а компилятор из паспорта
+#   исчезнет. Ровно тот же разрыв «факт есть, но не связан», что уже ловили на самотесте.
+check("снятое в сборочной стадии переносится в паспорт",
+      "cat /tmp/bi-toolchain.txt" in manifest_gen
+      and "cat /tmp/bi-nginx-deps.txt" in manifest_gen,
+      "паспорт не включает /build-info — поля собраны и потеряны")
+
+# ⚠ Гейт полноты — единственное, что отличает паспорт от красивого файла. Без него
+#   зависимость, добавленная завтра, выпадет из «Описания программы» молча.
+check("полнота паспорта сторожится гейтом сборки, а не доверием",
+      "ПАСПОРТ НЕПОЛОН" in dockerfile,
+      "не нашёл гейт, сверяющий ldd nginx с содержимым паспорта")
+
+check("entrypoint печатает паспорт при старте",
+      'log "паспорт сборки: $BUILD_MANIFEST"' in entrypoint_code,
+      "не нашёл строку лога о паспорте")
+
+check("паспорт описан в README как возможность изделия",
+      "## Паспорт сборки" in readme and MANIFEST_PATH in readme,
+      "нет раздела README про паспорт сборки — файл в образе оказался неописанным")
+
+# ⚠ И отдельно: README не должен обещать воспроизводимость. Проект её не заявляет, а
+#   паспорт легко прочитать как такое обещание — оговорка обязана стоять рядом.
+check("README не выдаёт паспорт за воспроизводимость сборки",
+      "НЕ утверждает: что сборка воспроизводима" in readme,
+      "нет оговорки: паспорт идентифицирует сборку, но не обещает её повторить")
 
 if failures:
     print(f"\nпровалено проверок: {len(failures)}", file=sys.stderr)
