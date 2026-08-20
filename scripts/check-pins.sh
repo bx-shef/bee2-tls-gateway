@@ -12,7 +12,8 @@
 # что-либо говорить об образе, потому что проверять будет другую версию криптостека.
 #
 # ⚠ ЧЕГО ЭТОТ СКРИПТ НАМЕРЕННО НЕ ДЕЛАЕТ. Он не сверяет версии, упомянутые в документации
-# прозой. В `PROCESS.md` законно живут исторические упоминания («1.28.0 нёс CVE-…»), и
+# прозой — КРОМЕ одной таблицы (см. проверку 4 ниже: `PROCESS.md` §6.2 объявляет состав
+# изделия как ТЕКУЩИЙ факт, её читает эксперт, и разъехаться ей нельзя). В `PROCESS.md` законно живут исторические упоминания («1.28.0 нёс CVE-…»), и
 # проверка «все упоминания версии равны текущему пину» краснела бы на правдивом тексте.
 # Проверка, которая врёт про исправный репозиторий, отключается первой — а вместе с ней
 # отключается и та её часть, которая была полезной.
@@ -25,18 +26,20 @@ cd "$(dirname "$0")/.."
 
 DOCKERFILE=Dockerfile
 CRYPTO=scripts/check-crypto.sh
+PROCESS=docs/PROCESS.md
 
-for f in "$DOCKERFILE" "$CRYPTO"; do
+for f in "$DOCKERFILE" "$CRYPTO" "$PROCESS"; do
   [ -r "$f" ] || { echo "FAIL нет файла $f" >&2; exit 1; }
 done
 
-DOCKERFILE="$DOCKERFILE" CRYPTO="$CRYPTO" python3 - <<'PY'
+DOCKERFILE="$DOCKERFILE" CRYPTO="$CRYPTO" PROCESS="$PROCESS" python3 - <<'PY'
 import os
 import re
 import sys
 
 dockerfile = open(os.environ["DOCKERFILE"], encoding="utf-8").read()
 crypto = open(os.environ["CRYPTO"], encoding="utf-8").read()
+process = open(os.environ["PROCESS"], encoding="utf-8").read()
 
 failures = []
 
@@ -107,6 +110,73 @@ check("OPENSSL_TAG выглядит тегом релиза openssl-X.Y.Z",
 check("NGINX_SHA256 — 64 hex-символа",
       re.fullmatch(r"[0-9a-f]{64}", pins["NGINX_SHA256"]) is not None,
       f"значение: {pins['NGINX_SHA256']}")
+
+# --- 4. Таблица состава изделия в PROCESS.md §6.2 ------------------------------------
+# Эта таблица — не проза и не история: она объявляет, ИЗ ЧЕГО СОБРАНО ИЗДЕЛИЕ СЕЙЧАС, и
+# именно её читает эксперт на анализе документации. Бампнут пин — она молча начнёт врать
+# про состав объекта испытаний, и красным это нигде не станет. Сверяем ТОЛЬКО её строки,
+# не весь файл: в остальном тексте исторические упоминания версий законны (см. шапку).
+tbl = re.search(r"\| Компонент \| Версия / пин \|[\s\S]*?\n\n", process)
+check("таблица состава §6.2 найдена в PROCESS.md", tbl is not None,
+      "заголовок «| Компонент | Версия / пин |» не найден — проверка ниже была бы пустой")
+
+if tbl is not None:
+    table = tbl.group(0)
+    # ⚠ Ищем в СВОЕЙ СТРОКЕ таблицы, а не «где-нибудь в таблице». Первая редакция искала
+    # вхождение подстроки — и была МЁРТВОЙ: `openssl-3.5.6` совпадал с именем файла патча
+    # `openssl-3.5.6.patch` в соседней строке, поэтому подмена версии в строке OpenSSL
+    # проверку не роняла. Поймано мутацией при вводе.
+    def row(component):
+        m = re.search(rf"^\| {component} \|([^|]*)\|", table, re.M)
+        return m.group(1) if m else None
+
+    ossl_row = row("OpenSSL")
+    check("состав §6.2 называет тот же OpenSSL, что собирает Dockerfile",
+          ossl_row is not None and pins["OPENSSL_TAG"] in ossl_row,
+          f"в Dockerfile {pins['OPENSSL_TAG']}, в строке таблицы: {ossl_row!r}")
+
+    nginx_row = row("nginx")
+    check("состав §6.2 называет ту же версию nginx",
+          nginx_row is not None and pins["NGINX_VERSION"] in nginx_row,
+          f"в Dockerfile {pins['NGINX_VERSION']}, в строке таблицы: {nginx_row!r}")
+    # Коммит bee2evp в таблице сокращён до префикса с многоточием — сверяем префикс.
+    m = re.search(r"коммит `([0-9a-f]{6,40})…?`", table)
+    check("состав §6.2 называет тот же коммит bee2evp",
+          m is not None and pins["BEE2EVP_COMMIT"].startswith(m.group(1)),
+          f"в Dockerfile {pins['BEE2EVP_COMMIT']}, в таблице {m.group(1) if m else 'не разобрался'}")
+
+# --- 5. Объём собственного кода в PROCESS.md §6.2 -------------------------------------
+#
+# ⚠ ЗАЧЕМ. §6.2 называет число строк по каждому своему файлу, и число это читает эксперт как
+# оценку трудоёмкости анализа исходных текстов. Оно устаревает МОЛЧА: правка кода не трогает
+# документ, CI зелен, а цифра врёт. Так и вышло — `nginx.conf.template` вырос с 174 до 222
+# строк при закрытии #93, и расхождение в 27 % пережило отдельный проход фактчека; поймали
+# двое проверяющих на панели, порознь.
+#
+# ⚠ ДОПУСК 5 %, а не ноль, и это осознанный выбор. Точная сверка краснела бы на каждой
+# однострочной правке любого из четырёх файлов — проверку, которая мешает работать, начинают
+# обходить. Наблюдавшийся дрейф (48 строк на 174) допуск ловит с запасом впятеро; мелкие
+# правки он пропускает, и это плата, названная здесь, а не умолчанная.
+LINE_COUNTS = {
+    "entrypoint.sh": "entrypoint.sh",
+    "nginx.conf.template": "nginx.conf.template",
+    "healthcheck.sh": "healthcheck.sh",
+    "Dockerfile": "Dockerfile",
+}
+claimed = dict(re.findall(r"`([A-Za-z0-9_.]+)` (\d+)", process))
+for label, path in LINE_COUNTS.items():
+    if label not in claimed:
+        check(f"§6.2 называет объём {label}", False, "числа нет в разделе")
+        continue
+    said = int(claimed[label])
+    try:
+        actual = sum(1 for _ in open(path, encoding="utf-8"))
+    except OSError as exc:
+        check(f"§6.2: файл {label} читается", False, str(exc))
+        continue
+    ok = actual and abs(said - actual) <= max(1, actual * 0.05)
+    check(f"§6.2 не завышает и не занижает объём {label}",
+          ok, f"в разделе {said}, фактически {actual} (допуск 5 %)")
 
 print()
 for name, value in pins.items():
