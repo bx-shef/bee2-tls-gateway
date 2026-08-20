@@ -74,6 +74,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates git gcc g++ make cmake perl python3 libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# ⚠ Кто собрал — записывается ЗДЕСЬ и больше нигде: в рантайм-образе компилятора нет
+# (стадия 3 его не ставит), а МИ.10165 п. 6.1.3 требует, чтобы «Описание программы»
+# однозначно идентифицировало «вызываемые стандартные функции (версия компилятора,
+# используемые стандартные библиотеки и т.п.)». Спросить об этом собранный образ потом
+# будет уже не у кого — поэтому спрашиваем сейчас и переносим ответ файлом.
+RUN set -eu; mkdir -p /build-info; \
+    { echo "компилятор:      $(gcc -dumpfullversion 2>/dev/null || gcc -dumpversion)"; \
+      echo "gcc --version:   $(gcc --version | head -1)"; \
+      echo "libc (сборка):   $(dpkg-query -W -f='${Version}' libc6)"; \
+      echo "libc6-dev:       $(dpkg-query -W -f='${Version}' libc6-dev)"; \
+      echo "make:            $(dpkg-query -W -f='${Version}' make)"; \
+      echo "cmake:           $(dpkg-query -W -f='${Version}' cmake)"; \
+    } > /build-info/toolchain.txt
+
 WORKDIR /src
 RUN git clone https://github.com/bcrypto/bee2evp bee2evp \
  && git -C bee2evp checkout --quiet "${BEE2EVP_COMMIT}" \
@@ -196,6 +210,10 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
       curl libpcre2-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# Заголовки PCRE2, против которых слинкован модуль rewrite, живут только в этой стадии.
+RUN set -eu; mkdir -p /build-info; \
+    echo "libpcre2-dev:    $(dpkg-query -W -f='${Version}' libpcre2-dev)" > /build-info/nginx-deps.txt
 
 WORKDIR /src
 RUN curl -fsSLO "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" \
@@ -363,6 +381,79 @@ RUN set -eu; \
     grep -q 'WTFPL' /usr/share/licenses/whereami-LICENSE.txt; \
     grep -q 'Gregory Pakosz' /usr/share/licenses/whereami-LICENSE.txt; \
     echo 'атрибуция на месте: 5 лицензий апстримов + LICENSE + NOTICE'
+
+# =================================================================================
+# Паспорт сборки — МИ.10165 п. 6.1.3 (C4.1)
+# =================================================================================
+# Норма дословно: при анализе документа «Описание программы» эксперт проверяет, что
+# «в документе должна быть указана информация, однозначно идентифицирующая вызываемые
+# стандартные функции (версия компилятора, используемые стандартные библиотеки и т.п.)».
+#
+# ⚠ Это требование к ДОКУМЕНТУ, и закрыть его можно было бы, вписав версии руками. Так
+# делать нельзя ровно по той причине, из-за которой в этом проекте заведён мутационный
+# харнесс: вписанное руками расходится с собранным молча, а расхождение обнаружит эксперт,
+# а не мы. Поэтому образ отвечает о себе сам, а «Описание программы» переписывает его
+# ответ. Источник истины — двоичные файлы, которые действительно поедут на испытания.
+#
+# ⚠ Чего этот файл НЕ утверждает: что сборка воспроизводима. Пакеты Debian берутся из
+# живых репозиториев и по версии не запинены, поэтому завтрашняя сборка может получить
+# другой libpcre2 — паспорт зафиксирует какой, но не гарантирует тот же. Воспроизводимость
+# — отдельная задача (B8, #105), и путать её с идентификацией нельзя: п. 6.1.3 требует
+# сказать, ЧЕМ собрано, а не суметь собрать это повторно.
+ARG DEBIAN_IMAGE
+ARG BEE2EVP_COMMIT
+ARG OPENSSL_TAG
+ARG NGINX_VERSION
+ARG NGINX_SHA256
+COPY --from=btls /build-info/toolchain.txt /tmp/bi-toolchain.txt
+COPY --from=nginx-build /build-info/nginx-deps.txt /tmp/bi-nginx-deps.txt
+RUN set -eu; \
+    { echo "ПАСПОРТ СБОРКИ crypto-gw"; \
+      echo "составлен при сборке образа; источник — сами двоичные файлы, а не документация"; \
+      echo; \
+      echo "== база =="; \
+      echo "базовый образ:   ${DEBIAN_IMAGE}"; \
+      . /etc/os-release; echo "дистрибутив:     ${PRETTY_NAME}"; \
+      echo; \
+      echo "== чем собрано (стадия 1, компилятора в этом образе нет) =="; \
+      cat /tmp/bi-toolchain.txt; \
+      cat /tmp/bi-nginx-deps.txt; \
+      echo; \
+      echo "== что собрано =="; \
+      echo "OpenSSL (тег):   ${OPENSSL_TAG}"; \
+      echo "OpenSSL (факт):  $(/opt/btls/bin/openssl version)"; \
+      echo "bee2evp коммит:  ${BEE2EVP_COMMIT}"; \
+      echo "nginx версия:    ${NGINX_VERSION}"; \
+      echo "nginx sha256:    ${NGINX_SHA256}"; \
+      echo; \
+      echo "== стандартные библиотеки, вызываемые поставляемыми файлами =="; \
+      echo "(NEEDED каждого двоичного файла, снят с самого файла)"; \
+      for _f in /opt/nginx/sbin/nginx /opt/btls/bin/openssl /opt/btls/bin/bee2cmd \
+                /opt/btls/lib/libssl.so.3 /opt/btls/lib/libcrypto.so.3 \
+                /opt/btls/lib/libbee2evp.so; do \
+        echo "-- $_f"; \
+        ldd "$_f" 2>/dev/null | sed "s/^/     /"; \
+      done; \
+      echo; \
+      echo "== версии пакетов рантайма =="; \
+      dpkg-query -W -f='${binary:Package} ${Version}\n' libc6 libpcre2-8-0 gettext-base \
+        | sed "s/^/     /"; \
+    } > /etc/crypto-gw/build-manifest.txt; \
+    rm -f /tmp/bi-toolchain.txt /tmp/bi-nginx-deps.txt; \
+    chmod 0444 /etc/crypto-gw/build-manifest.txt
+
+# Гейт паспорта: файл бесполезен, если в нём не оказалось того, ради чего он заведён.
+# Проверяем не «файл существует», а что каждая библиотека, которую РЕАЛЬНО зовёт nginx,
+# в паспорт попала. Иначе добавленная завтра зависимость молча выпадет из «Описания
+# программы» — тот самый класс дефекта, который здесь уже ловили трижды.
+RUN set -eu; \
+    for _need in $(ldd /opt/nginx/sbin/nginx | awk '{print $1}' | grep -E '^lib.*\.so' | sort -u); do \
+      grep -q -- "$_need" /etc/crypto-gw/build-manifest.txt \
+        || { echo "ПАСПОРТ НЕПОЛОН: $_need не попала в build-manifest.txt" >&2; exit 1; }; \
+    done; \
+    grep -q '^компилятор:' /etc/crypto-gw/build-manifest.txt; \
+    grep -q 'OpenSSL (факт):' /etc/crypto-gw/build-manifest.txt; \
+    echo 'паспорт сборки полон: каждая NEEDED-библиотека nginx в нём названа'
 
 # Unprivileged. The listen port is >1024 and every writable path is /tmp, so nothing
 # here wants root.
