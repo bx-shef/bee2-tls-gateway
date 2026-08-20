@@ -367,6 +367,17 @@ mutate("второй client_max_body_size во вложенном location пе�
                    "location = /healthz {\n            client_max_body_size 8m;"),
        "тело ЗАПРОСА не уходит во временный файл")
 
+# ⚠ И вторая половина неравенства тоже мутируется. Первая редакция ломала только верхнюю
+# границу; но неравенство держится ДВУМЯ числами, и снятый буфер роняет его так же верно,
+# как поднятый максимум. Обе мутации ниже — вторая находка того же ревьюера.
+mutate("client_body_buffer_size удалён — сверять неравенство стало нечем",
+       lambda: sub(TPL, r"\n\s*client_body_buffer_size [^;]+;", ""),
+       "тело ЗАПРОСА не уходит во временный файл")
+
+mutate("client_body_buffer_size занижен ниже максимума тела",
+       lambda: sub(TPL, r"client_body_buffer_size 64k;", "client_body_buffer_size 8k;"),
+       "тело ЗАПРОСА не уходит во временный файл")
+
 # --- собеседник проверяется -------------------------------------------------------
 mutate("proxy_ssl_verify выключен",
        lambda: sub(TPL, r"proxy_ssl_verify on;", "proxy_ssl_verify off;"),
