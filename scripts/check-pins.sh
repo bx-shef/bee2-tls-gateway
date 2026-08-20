@@ -145,6 +145,39 @@ if tbl is not None:
           m is not None and pins["BEE2EVP_COMMIT"].startswith(m.group(1)),
           f"в Dockerfile {pins['BEE2EVP_COMMIT']}, в таблице {m.group(1) if m else 'не разобрался'}")
 
+# --- 5. Объём собственного кода в PROCESS.md §6.2 -------------------------------------
+#
+# ⚠ ЗАЧЕМ. §6.2 называет число строк по каждому своему файлу, и число это читает эксперт как
+# оценку трудоёмкости анализа исходных текстов. Оно устаревает МОЛЧА: правка кода не трогает
+# документ, CI зелен, а цифра врёт. Так и вышло — `nginx.conf.template` вырос с 174 до 222
+# строк при закрытии #93, и расхождение в 27 % пережило отдельный проход фактчека; поймали
+# двое проверяющих на панели, порознь.
+#
+# ⚠ ДОПУСК 5 %, а не ноль, и это осознанный выбор. Точная сверка краснела бы на каждой
+# однострочной правке любого из четырёх файлов — проверку, которая мешает работать, начинают
+# обходить. Наблюдавшийся дрейф (48 строк на 174) допуск ловит с запасом впятеро; мелкие
+# правки он пропускает, и это плата, названная здесь, а не умолчанная.
+LINE_COUNTS = {
+    "entrypoint.sh": "entrypoint.sh",
+    "nginx.conf.template": "nginx.conf.template",
+    "healthcheck.sh": "healthcheck.sh",
+    "Dockerfile": "Dockerfile",
+}
+claimed = dict(re.findall(r"`([A-Za-z0-9_.]+)` (\d+)", process))
+for label, path in LINE_COUNTS.items():
+    if label not in claimed:
+        check(f"§6.2 называет объём {label}", False, "числа нет в разделе")
+        continue
+    said = int(claimed[label])
+    try:
+        actual = sum(1 for _ in open(path, encoding="utf-8"))
+    except OSError as exc:
+        check(f"§6.2: файл {label} читается", False, str(exc))
+        continue
+    ok = actual and abs(said - actual) <= max(1, actual * 0.05)
+    check(f"§6.2 не завышает и не занижает объём {label}",
+          ok, f"в разделе {said}, фактически {actual} (допуск 5 %)")
+
 print()
 for name, value in pins.items():
     print(f"пин {name:16} = {value}")
