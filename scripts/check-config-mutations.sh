@@ -343,6 +343,23 @@ mutate("второй proxy_max_temp_file_size во вложенном location �
                    "location = /healthz {\n            proxy_max_temp_file_size 5m;"),
        "расшифрованный ОТВЕТ не уходит во временный файл")
 
+# ⚠ Три мутации на возобновление сессии к апстриму (СТБ 34.101.90 прил. Б, Б.4 п. 1).
+#   Третья — переопределение во вложенном location: конфиг остаётся валидным, `nginx -t`
+#   проходит, а возобновление молча возвращается. Ровно тот класс, что уже поймали на
+#   `proxy_max_temp_file_size`, поэтому заводим его сразу, а не после регресса.
+mutate("proxy_ssl_session_reuse удалён — вернулось умолчание on",
+       lambda: sub(TPL, r"\n\s*proxy_ssl_session_reuse [^;]+;", ""),
+       "сессия к апстриму не возобновляется")
+
+mutate("proxy_ssl_session_reuse снова on — сеанс без EMS будет возобновлён",
+       lambda: sub(TPL, r"proxy_ssl_session_reuse off;", "proxy_ssl_session_reuse on;"),
+       "сессия к апстриму не возобновляется")
+
+mutate("второй proxy_ssl_session_reuse во вложенном location переопределяет off",
+       lambda: sub(TPL, r"location = /healthz \{",
+                   "location = /healthz {\n            proxy_ssl_session_reuse on;"),
+       "сессия к апстриму не возобновляется")
+
 mutate("worker_rlimit_core удалён — жёсткий предел ядра снова наследуется",
        lambda: sub(TPL, r"\nworker_rlimit_core [^;]+;", ""),
        "ядро воркера не выгружается на носитель")
