@@ -351,6 +351,15 @@ mutate("worker_rlimit_core ненулевой — дамп памяти ворк
        lambda: sub(TPL, r"worker_rlimit_core 0;", "worker_rlimit_core 100m;"),
        "ядро воркера не выгружается на носитель")
 
+# ⚠ Третья мутация той же директивы — про КОНТЕКСТ, не про значение. Находка тестировщика:
+# перенесённая в `http {}` директива сохраняет текст и значение, проверка значения остаётся
+# зелёной, а nginx отвергает конфиг («directive is not allowed here») — то есть поломка
+# ловилась бы только `nginx -t` в необязательном job `image`.
+mutate("worker_rlimit_core уехала из главного контекста в http {}",
+       lambda: (sub(TPL, r"\nworker_rlimit_core 0;", "")
+                and sub(TPL, r"^http \{$", "http {\n    worker_rlimit_core 0;")),
+       "worker_rlimit_core стоит в главном контексте")
+
 mutate("client_max_body_size поднят выше буфера — тело запроса уедет в файл",
        lambda: sub(TPL, r"client_max_body_size 64k;", "client_max_body_size 1m;"),
        "тело ЗАПРОСА не уходит во временный файл")
