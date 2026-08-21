@@ -108,7 +108,7 @@ RUN git clone https://github.com/bcrypto/bee2evp bee2evp \
 #
 # Сверка ПОБАЙТНАЯ (`cmp`), а не по грепу: смысл гейта в том, что отличий нет вовсе.
 COPY vendor/bee2evp/openssl-3.5.6.patch vendor/bee2evp/btls.c vendor/bee2evp/btls.h \
-     /src/vendor/bee2evp/
+     vendor/bee2evp/belt_tls.c /src/vendor/bee2evp/
 RUN set -eu; \
     cmp /src/vendor/bee2evp/openssl-3.5.6.patch /src/bee2evp/btls/patch/openssl-3.5.6.patch \
       || { echo 'ВЕНДОР РАЗОШЁЛСЯ: openssl-3.5.6.patch отличается от bee2evp на пине' >&2; exit 1; }; \
@@ -116,6 +116,8 @@ RUN set -eu; \
       || { echo 'ВЕНДОР РАЗОШЁЛСЯ: btls.c отличается от bee2evp на пине' >&2; exit 1; }; \
     cmp /src/vendor/bee2evp/btls.h /src/bee2evp/btls/btls.h \
       || { echo 'ВЕНДОР РАЗОШЁЛСЯ: btls.h отличается от bee2evp на пине' >&2; exit 1; }; \
+    cmp /src/vendor/bee2evp/belt_tls.c /src/bee2evp/src/belt_tls.c \
+      || { echo 'ВЕНДОР РАЗОШЁЛСЯ: belt_tls.c отличается от bee2evp на пине' >&2; exit 1; }; \
     mkdir -p /build-info; \
     echo "вендор BTLS:     сверен побайтно с bee2evp ${BEE2EVP_COMMIT}" \
       > /build-info/vendor-btls.txt; \
