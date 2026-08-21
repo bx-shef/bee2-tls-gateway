@@ -577,6 +577,7 @@ for _label, _needle, _where, _wname in [
     ("фактическая версия OpenSSL", "OpenSSL (факт):", manifest_gen, "блоке паспорта"),
     ("коммит bee2evp", "bee2evp коммит:", manifest_gen, "блоке паспорта"),
     ("NEEDED поставляемых файлов", "ldd ", manifest_gen, "блоке паспорта"),
+    ("отметку о сверке вендора BTLS", "bi-vendor-btls.txt", manifest_gen, "блоке паспорта"),
 ]:
     check(f"паспорт несёт: {_label}", _needle in _where,
           f"не нашёл в {_wname}: {_needle}")
@@ -586,7 +587,8 @@ for _label, _needle, _where, _wname in [
 #   исчезнет. Ровно тот же разрыв «факт есть, но не связан», что уже ловили на самотесте.
 check("снятое в сборочной стадии переносится в паспорт",
       "cat /tmp/bi-toolchain.txt" in manifest_gen
-      and "cat /tmp/bi-nginx-deps.txt" in manifest_gen,
+      and "cat /tmp/bi-nginx-deps.txt" in manifest_gen
+      and "cat /tmp/bi-vendor-btls.txt" in manifest_gen,
       "паспорт не включает /build-info — поля собраны и потеряны")
 
 # ⚠ Гейт полноты — единственное, что отличает паспорт от красивого файла. Без него
