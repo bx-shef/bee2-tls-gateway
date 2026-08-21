@@ -337,6 +337,44 @@ jobs:
           done
           echo "ok: паспорт сборки дожил до рантайма и называет все $(wc -w <<<"$needed") библиотеки nginx"
 
+          # ---- реестр исполняемого: критерий 6.4.8, задача C6 ----------------------
+          # Требование задачи дословно: «новый исполняемый файл в образе без записи в
+          # перечне роняет сборку». Текстом это недостижимо — надо смотреть в образ.
+          # Сверка РАВЕНСТВОМ МНОЖЕСТВ в обе стороны: файл без строки — красное; строка
+          # без файла — тоже. Односторонняя проверка («всё объявленное на месте») прошла бы
+          # зелёной ровно в том случае, ради которого критерий и существует.
+          declared_files=$(python3 scripts/runtime-inventory.py README.md files | sort -u)
+          actual_files=$(docker run --rm --entrypoint sh bee2-tls-gateway:ci -c '
+            find /opt/btls/bin /opt/nginx/sbin /usr/local/bin -type f -perm -u+x 2>/dev/null
+            find /opt/btls/lib -type f -name "*.so*" 2>/dev/null
+          ' | sort -u)
+          echo "--- объявлено в README ---"; printf '%s\n' "$declared_files"
+          echo "--- фактически в образе ---"; printf '%s\n' "$actual_files"
+          if ! diff <(printf '%s\n' "$declared_files") <(printf '%s\n' "$actual_files") >/dev/null; then
+            echo "FAIL: реестр README § «Что исполняется в образе» разошёлся с образом" >&2
+            diff <(printf '%s\n' "$declared_files") <(printf '%s\n' "$actual_files") \
+              | sed 's/^</  только в README: /; s/^>/  только в образе: /' >&2
+            exit 1
+          fi
+          echo "ok: реестр файлов совпал с образом ($(wc -l <<<"$actual_files") позиций)"
+
+          # Подкоманды bee2cmd спрашиваем у самого bee2cmd. Формат вывода задан апстримом
+          # (cmd_main.c, cmdUsage): строка вида «  bee2cmd {a|b|c} ...». Справка выходит с
+          # ненулевым кодом — это норма, отсюда `|| true`.
+          usage=$(docker run --rm --entrypoint /opt/btls/bin/bee2cmd bee2-tls-gateway:ci 2>&1 || true)
+          printf '%s\n' "$usage"
+          actual_cmds=$(sed -n 's/.*bee2cmd {\([^}]*\)}.*/\1/p' <<<"$usage" | tr '|' '\n' \
+                        | sed '/^$/d' | sort -u)
+          [ -n "$actual_cmds" ] || { echo "FAIL: не разобрал перечень подкоманд bee2cmd" >&2; exit 1; }
+          declared_cmds=$(python3 scripts/runtime-inventory.py README.md cmds | sort -u)
+          if ! diff <(printf '%s\n' "$declared_cmds") <(printf '%s\n' "$actual_cmds") >/dev/null; then
+            echo "FAIL: перечень подкоманд bee2cmd в README разошёлся с бинарём" >&2
+            diff <(printf '%s\n' "$declared_cmds") <(printf '%s\n' "$actual_cmds") \
+              | sed 's/^</  только в README: /; s/^>/  только в bee2cmd: /' >&2
+            exit 1
+          fi
+          echo "ok: перечень подкоманд bee2cmd совпал ($(wc -l <<<"$actual_cmds") штук)"
+
           docker rm -f gw-smoke
 
           # ---- незнакомая GW_-переменная не проходит МОЛЧА (#75) --------------------

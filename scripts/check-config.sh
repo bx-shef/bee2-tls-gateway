@@ -609,6 +609,61 @@ check("README не выдаёт паспорт за воспроизводимо
       "НЕ утверждает: что сборка воспроизводима" in readme,
       "нет оговорки: паспорт идентифицирует сборку, но не обещает её повторить")
 
+
+# =====================================================================================
+# 13. Реестр исполняемого в образе (критерий 6.4.8, задача C6)
+# =====================================================================================
+# ⚠ Граница проверок названа нарочно, как и в проверке 12.
+#   ТЕКСТОМ: что реестр существует, разбирается, у каждой строки есть назначение, что
+#   поведенческий сторож не выпилен из CI и что перечень НЕ размножился обратно по трём
+#   файлам.
+#   НЕ ТЕКСТОМ: совпадает ли реестр с содержимым образа. Это job `image`: он перечисляет
+#   исполняемые файлы внутри собранного образа и спрашивает у bee2cmd его подкоманды,
+#   сверяя равенством множеств в обе стороны.
+import importlib.util as _ilu
+_spec = _ilu.spec_from_file_location("rtinv", "scripts/runtime-inventory.py")
+_rtinv = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(_rtinv)
+inv_files, inv_cmds = _rtinv.parse(readme)
+
+check("реестр исполняемого есть в README и разбирается",
+      bool(inv_files) and bool(inv_cmds),
+      f"файлов разобрано {len(inv_files)}, подкоманд {len(inv_cmds)} — ждём непустые")
+
+# Перечисление имён требованию не удовлетворяет: правило проекта требует описывать
+# каждую доступную ВОЗМОЖНОСТЬ, а не файл. Пустая клетка назначения — это перечисление.
+_files_sec = _rtinv._section(readme, _rtinv.FILES_HEADING)
+_cmds_sec = _rtinv._section(readme, _rtinv.CMDS_HEADING)
+for _label, _sec, _min_cols in [("файлов", _files_sec, 3), ("подкоманд", _cmds_sec, 3)]:
+    _bad = []
+    for _line in _sec.splitlines():
+        _line = _line.strip()
+        if not _line.startswith("|") or set(_line) <= set("|- "):
+            continue
+        _cells = [c.strip() for c in _line.split("|")[1:-1]]
+        if len(_cells) < _min_cols or not all(_cells[1:]):
+            _bad.append(_cells[0] if _cells else _line)
+    check(f"в реестре {_label} у каждой строки заполнено назначение",
+          not _bad, f"пустые клетки у: {_bad}")
+
+ci_yml = open(".github/workflows/ci.yml", encoding="utf-8").read()
+check("реестр сверяется с ОБРАЗОМ, а не только описан",
+      "scripts/runtime-inventory.py README.md files" in ci_yml
+      and "scripts/runtime-inventory.py README.md cmds" in ci_yml,
+      "в job `image` нет сверки реестра с собранным образом")
+
+# ⚠ Главный сторож этой задачи. До 20.08.2026 перечень подкоманд жил в трёх файлах
+#   независимо и ничем не сверялся. Свести в одно мало — надо запретить размножаться
+#   обратно, иначе следующий добросовестно «продублирует для удобства».
+_ballast = {"kg", "sig", "csr", "cvc", "cvr", "pwd", "stamp", "affix", "fmt"}
+for _fname, _text in [("docs/PROCESS.md", open("docs/PROCESS.md", encoding="utf-8").read()),
+                      ("docs/CERTIFICATION.md",
+                       open("docs/CERTIFICATION.md", encoding="utf-8").read())]:
+    _hits = {c for c in _ballast if re.search(rf"`{c}`", _text)}
+    check(f"перечень подкоманд не продублирован в {_fname}",
+          len(_hits) < 3,
+          f"похоже на вторую копию списка: {sorted(_hits)} — перечень живёт в README")
+
 if failures:
     print(f"\nпровалено проверок: {len(failures)}", file=sys.stderr)
     sys.exit(1)
