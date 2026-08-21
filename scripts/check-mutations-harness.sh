@@ -28,7 +28,7 @@ cd "$(dirname "$0")/.."
 HARNESS=scripts/check-config-mutations.sh
 # Тот же список, что в самом харнессе. Расхождение означает, что проверка смотрит не на те
 # файлы и молча ничего не доказывает, — поэтому оно сверяется случаем 0.
-MUTATED=(nginx.conf.template entrypoint.sh Dockerfile scripts/check-crypto.sh)
+MUTATED=(nginx.conf.template entrypoint.sh Dockerfile scripts/check-crypto.sh .github/workflows/ci.yml scripts/runtime-inventory.py)
 
 # Строка, которой харнесс заканчивает УСПЕШНЫЙ прогон. Нужна, чтобы отличить «мы его
 # убили» от «он успел доработать сам» — см. случай 1.
@@ -164,7 +164,9 @@ if diff <(printf '%s\n' "${MUTATED[@]}" | sort) \
         <(sed -n 's/^MUTATED = (\(.*\))$/\1/p' "$HARNESS" \
           | tr -d ' ' | tr ',' '\n' | sed 's/^\(TPL\)$/nginx.conf.template/;
               s/^\(EP\)$/entrypoint.sh/; s/^\(DF\)$/Dockerfile/;
-              s/^\(CR\)$/scripts\/check-crypto.sh/' | sort) > /dev/null; then
+              s/^\(CR\)$/scripts\/check-crypto.sh/;
+              s/^\(CI\)$/.github\/workflows\/ci.yml/;
+              s/^\(RI\)$/scripts\/runtime-inventory.py/' | sort) > /dev/null; then
   ok "списки совпадают"
 else
   bad "список MUTATED в харнессе разошёлся с этим скриптом"
