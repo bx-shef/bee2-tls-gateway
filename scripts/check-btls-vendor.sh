@@ -17,13 +17,15 @@ VENDOR=vendor/bee2evp
 PATCHF="$VENDOR/openssl-3.5.6.patch"
 BTLS_H="$VENDOR/btls.h"
 BTLS_C="$VENDOR/btls.c"
+BELT_TLS="$VENDOR/belt_tls.c"
 PROV="$VENDOR/PROVENANCE"
 
-for f in "$PATCHF" "$BTLS_H" "$BTLS_C" "$PROV" Dockerfile nginx.conf.template; do
+for f in "$PATCHF" "$BTLS_H" "$BTLS_C" "$BELT_TLS" "$PROV" Dockerfile nginx.conf.template; do
   [ -r "$f" ] || { echo "FAIL нет файла $f" >&2; exit 1; }
 done
 
-PATCHF="$PATCHF" BTLS_H="$BTLS_H" BTLS_C="$BTLS_C" PROV="$PROV" python3 - <<'PY'
+PATCHF="$PATCHF" BTLS_H="$BTLS_H" BTLS_C="$BTLS_C" BELT_TLS="$BELT_TLS" PROV="$PROV" \
+  python3 - <<'PY'
 import os
 import re
 import sys
@@ -31,6 +33,7 @@ import sys
 patch = open(os.environ["PATCHF"], encoding="utf-8", errors="replace").read()
 btls_h = open(os.environ["BTLS_H"], encoding="utf-8", errors="replace").read()
 btls_c = open(os.environ["BTLS_C"], encoding="utf-8", errors="replace").read()
+belt_tls = open(os.environ["BELT_TLS"], encoding="utf-8", errors="replace").read()
 prov = open(os.environ["PROV"], encoding="utf-8", errors="replace").read()
 dockerfile = open("Dockerfile", encoding="utf-8").read()
 template = open("nginx.conf.template", encoding="utf-8").read()
@@ -117,6 +120,30 @@ if cke:
     check("§6.5 верен: возврат EVP_PKEY_CTX_new не проверяется",
           ctx_line is not None and "pkey_ctx == NULL" not in ctx_line.group(1),
           "апстрим, похоже, починил — перечитать §6.5 и #138")
+
+
+# 6. Субпротоколы Record и CCS (критерии 6.4.3 и 6.4.5). Оба метода — АНАЛИЗ ИСХОДНЫХ
+#    ТЕКСТОВ, а не чёрный ящик: «эксперт проверяет, что порядковый номер seq_num
+#    сбрасывается…», «эксперт проверяет, что после отправки ChangeCipherSpec каждая
+#    из сторон поменяет старые параметры на новые». Значит и подтверждать их надо
+#    текстом, а подтверждение обязано краснеть при смене пина.
+check("патч не трогает слой Record — он стоковый",
+      not re.search(r"(?m)^\+\+\+ b/ssl/record/", patch),
+      "патч изменяет ssl/record/ — утверждение §6.6 о стоковом Record устарело")
+check("патч не трогает субпротокол Change Cipher Spec",
+      not re.search(r"change_cipher|\bCCS\b", patch),
+      "патч упоминает смену параметров защиты — §6.6 требует перечитать")
+
+# ⚠ Требование 6.4.3 к belt-ctr дословно: синхропосылка — «8 байтовый порядковый номер,
+#   дополненный 8 нулевыми байтами». Вот две строки, которые его исполняют. Изменятся —
+#   проверка покраснеет, и утверждение §6.6 придётся перечитать, а не унаследовать.
+check("belt-ctr-tls строит синхропосылку как требует 6.4.3: seq_num ‖ нули",
+      "memCopy(state->iv, state->aad, 8);" in belt_tls
+      and "memSetZero(state->iv + 8, 8);" in belt_tls,
+      "сборка синхропосылки belt-ctr изменилась")
+check("belt-dwp-tls пишет явную синхропосылку и сверяет её с предыдущей",
+      "ASSERT(!memEq(state->aad, state->iv + 8, 8));" in belt_tls,
+      "исчезла проверка различия явных синхропосылок belt-dwp")
 
 if failures:
     print(f"\nпровалено проверок: {len(failures)}", file=sys.stderr)

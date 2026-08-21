@@ -48,6 +48,7 @@ RI = "scripts/runtime-inventory.py"
 VP = "vendor/bee2evp/openssl-3.5.6.patch"
 VH = "vendor/bee2evp/btls.h"
 VC = "vendor/bee2evp/btls.c"
+VBT = "vendor/bee2evp/belt_tls.c"
 VPR = "vendor/bee2evp/PROVENANCE"
 
 # Всё, что мутируем, обязано откатываться. Забыть файл здесь — значит оставить мутацию
@@ -60,7 +61,7 @@ VPR = "vendor/bee2evp/PROVENANCE"
 # работать. Проверка, которую нельзя запустить в разгар работы, перестаёт запускаться
 # вовсе. Вместо этого сверка README↔код сделана равенством множеств, где источник истины —
 # код: пустой README теперь не «нечему разойтись», а прямое расхождение.
-MUTATED = (TPL, EP, DF, CR, CI, RI, VP, VH, VC, VPR)
+MUTATED = (TPL, EP, DF, CR, CI, RI, VP, VH, VC, VPR, VBT)
 
 
 # ⚠ Таймауты у ОБОИХ подпроцессов — #44. Зависший вызов (ждёт ввода, бесконечный цикл)
@@ -485,6 +486,24 @@ VENDOR_CHECK = "scripts/check-btls-vendor.sh"
 mutate("отметка гейта вендора не попадает в паспорт — гейт станет непроверяемым",
        lambda: sub(DF, r"cat /tmp/bi-vendor-btls\.txt;", "true;"),
        "снятое в сборочной стадии переносится в паспорт")
+
+# ⚠ Критерии 6.4.3 и 6.4.5 (Record, CCS). Метод обоих — анализ исходных текстов, поэтому
+#   и подтверждение текстовое; без мутаций это были бы четыре зелёные строки без веса.
+mutate("патч стал трогать слой Record — §6.6 устарел бы молча",
+       lambda: sub(VP, r"\+\+\+ b/ssl/s3_lib\.c", "+++ b/ssl/record/methods/tls1_meth.c"),
+       "патч не трогает слой Record", script=VENDOR_CHECK)
+
+mutate("патч упомянул change_cipher — CCS перестал быть стоковым",
+       lambda: sub(VP, r"\+#include \"btls\.h\"", '+#include "btls.h" /* change_cipher */'),
+       "патч не трогает субпротокол Change Cipher Spec", script=VENDOR_CHECK)
+
+mutate("синхропосылка belt-ctr перестала дополняться нулями (6.4.3)",
+       lambda: sub(VBT, r"memSetZero\(state->iv \+ 8, 8\);", "memCopy(state->iv + 8, state->aad, 8);"),
+       "belt-ctr-tls строит синхропосылку как требует 6.4.3", script=VENDOR_CHECK)
+
+mutate("у belt-dwp исчезла проверка различия явных синхропосылок",
+       lambda: sub(VBT, r"ASSERT\(!memEq\(state->aad, state->iv \+ 8, 8\)\);", "/* снято */"),
+       "belt-dwp-tls пишет явную синхропосылку и сверяет её", script=VENDOR_CHECK)
 
 mutate("пин bee2evp двинут, а вендорённые копии не обновлены",
        lambda: sub(VPR, r"^commit: 2ae3c71e8b24b6904367850e5963933236a1539f",
