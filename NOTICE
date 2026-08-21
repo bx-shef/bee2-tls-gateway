@@ -20,6 +20,13 @@ bee2evp — EVP interfaces over bee2, an OpenSSL engine
     Copyright The Bee2evp authors
     Apache License 2.0 — /usr/share/licenses/bee2evp-LICENSE.txt
 
+    ⚠ VENDORED COPY IN THIS REPOSITORY. Three files from bee2evp are kept under
+    vendor/bee2evp/ — openssl-3.5.6.patch, btls.c, btls.h — together with a copy
+    of the project's Apache-2.0 licence. They are NOT modified and NOT applied by
+    us: they are present so that statements this repository makes about them are
+    verifiable in the tree that gets audited. A build gate compares them byte for
+    byte against bee2evp at the pinned commit; see vendor/bee2evp/PROVENANCE.
+
 bee2 — cryptographic library implementing STB 34.101 (bign, belt, hbelt, ...)
     https://github.com/agievich/bee2
     Copyright The Bee2 authors

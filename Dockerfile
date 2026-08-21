@@ -93,6 +93,40 @@ RUN git clone https://github.com/bcrypto/bee2evp bee2evp \
  && git -C bee2evp checkout --quiet "${BEE2EVP_COMMIT}" \
  && test "$(git -C bee2evp rev-parse HEAD)" = "${BEE2EVP_COMMIT}"
 
+# =================================================================================
+# Гейт: вендорённые копии BTLS совпадают с тем, что реально соберётся (#125)
+# =================================================================================
+# Документ архитектуры утверждает «сверено по тексту патча» — про коды наборов, про
+# неприкосновенность extended_master_secret, про путь уничтожения pre_master_secret.
+# Файла, по которому сверялись, в дереве не было: он тянулся отсюда в момент сборки.
+# Теперь копии лежат в vendor/bee2evp/, и этот гейт делает утверждение проверяемым:
+# аудировали мы ровно то, что применяется, — иначе сборка не пройдёт.
+#
+# ⚠ Файлов три, а не один: scripts/source.sh апстрима кладёт в libssl ещё и btls.c с
+# btls.h, то есть НОВЫЙ исходный текст. Именно в btls.c найдены дефекты, разобранные
+# в docs/PROCESS.md §6.5.
+#
+# Сверка ПОБАЙТНАЯ (`cmp`), а не по грепу: смысл гейта в том, что отличий нет вовсе.
+COPY vendor/bee2evp/openssl-3.5.6.patch vendor/bee2evp/btls.c vendor/bee2evp/btls.h \
+     /src/vendor/bee2evp/
+RUN set -eu; \
+    cmp /src/vendor/bee2evp/openssl-3.5.6.patch /src/bee2evp/btls/patch/openssl-3.5.6.patch \
+      || { echo 'ВЕНДОР РАЗОШЁЛСЯ: openssl-3.5.6.patch отличается от bee2evp на пине' >&2; exit 1; }; \
+    cmp /src/vendor/bee2evp/btls.c /src/bee2evp/btls/btls.c \
+      || { echo 'ВЕНДОР РАЗОШЁЛСЯ: btls.c отличается от bee2evp на пине' >&2; exit 1; }; \
+    cmp /src/vendor/bee2evp/btls.h /src/bee2evp/btls/btls.h \
+      || { echo 'ВЕНДОР РАЗОШЁЛСЯ: btls.h отличается от bee2evp на пине' >&2; exit 1; }; \
+    mkdir -p /build-info; \
+    echo "вендор BTLS:     сверен побайтно с bee2evp ${BEE2EVP_COMMIT}" \
+      > /build-info/vendor-btls.txt; \
+    echo 'вендорённые копии BTLS побайтно совпадают с bee2evp на пине'
+
+# ⚠ Отметка гейта попадает в ПАСПОРТ СБОРКИ, и это не украшение. Вывод самого гейта живёт
+# только в логе сборки, а лог GitHub Actions отдаётся усечённым: ранние шаги из него
+# выпадают, и «исполнился ли гейт» становится непроверяемым ровно через сутки. Проверка,
+# результат которой нельзя предъявить, — это доверие, а не проверка. Отметка же едет в
+# образе, печатается при каждом старте и сверяется пробой job `image`.
+
 # ⚠ UPSTREAM BUG, worked around here. scripts/source.sh decides the OpenSSL build type
 # with `[[ "$build_type" -eq "Debug" ]]` — `-eq` is NUMERIC comparison, and bash coerces
 # both strings to 0, so the test is ALWAYS true and OpenSSL is ALWAYS configured with
@@ -407,6 +441,7 @@ ARG NGINX_VERSION
 ARG NGINX_SHA256
 COPY --from=btls /build-info/toolchain.txt /tmp/bi-toolchain.txt
 COPY --from=nginx-build /build-info/nginx-deps.txt /tmp/bi-nginx-deps.txt
+COPY --from=btls /build-info/vendor-btls.txt /tmp/bi-vendor-btls.txt
 RUN set -eu; \
     { echo "ПАСПОРТ СБОРКИ crypto-gw"; \
       echo "составлен при сборке образа; источник — сами двоичные файлы, а не документация"; \
@@ -418,6 +453,7 @@ RUN set -eu; \
       echo "== чем собрано (стадия 1, компилятора в этом образе нет) =="; \
       cat /tmp/bi-toolchain.txt; \
       cat /tmp/bi-nginx-deps.txt; \
+      cat /tmp/bi-vendor-btls.txt; \
       echo; \
       echo "== что собрано =="; \
       echo "OpenSSL (тег):   ${OPENSSL_TAG}"; \
@@ -439,7 +475,7 @@ RUN set -eu; \
       dpkg-query -W -f='${binary:Package} ${Version}\n' libc6 libpcre2-8-0 gettext-base \
         | sed "s/^/     /"; \
     } > /etc/crypto-gw/build-manifest.txt; \
-    rm -f /tmp/bi-toolchain.txt /tmp/bi-nginx-deps.txt; \
+    rm -f /tmp/bi-toolchain.txt /tmp/bi-nginx-deps.txt /tmp/bi-vendor-btls.txt; \
     chmod 0444 /etc/crypto-gw/build-manifest.txt
 
 # Гейт паспорта: файл бесполезен, если в нём не оказалось того, ради чего он заведён.

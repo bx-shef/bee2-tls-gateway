@@ -42,6 +42,13 @@ CR = "scripts/check-crypto.sh"
 # старте прогона их не ломает, в отличие от README.
 CI = ".github/workflows/ci.yml"
 RI = "scripts/runtime-inventory.py"
+# ⚠ Добавлены 21.08.2026 (#125). Вендорённые копии BTLS несут проверки, которые
+# превращают «сверено по тексту патча» в утверждение, способное покраснеть. Без мутаций
+# это были бы одиннадцать зелёных строк без доказательства, что они что-то ловят.
+VP = "vendor/bee2evp/openssl-3.5.6.patch"
+VH = "vendor/bee2evp/btls.h"
+VC = "vendor/bee2evp/btls.c"
+VPR = "vendor/bee2evp/PROVENANCE"
 
 # Всё, что мутируем, обязано откатываться. Забыть файл здесь — значит оставить мутацию
 # в рабочем дереве и увести следующего в разбор несуществующей поломки.
@@ -53,7 +60,7 @@ RI = "scripts/runtime-inventory.py"
 # работать. Проверка, которую нельзя запустить в разгар работы, перестаёт запускаться
 # вовсе. Вместо этого сверка README↔код сделана равенством множеств, где источник истины —
 # код: пустой README теперь не «нечему разойтись», а прямое расхождение.
-MUTATED = (TPL, EP, DF, CR, CI, RI)
+MUTATED = (TPL, EP, DF, CR, CI, RI, VP, VH, VC, VPR)
 
 
 # ⚠ Таймауты у ОБОИХ подпроцессов — #44. Зависший вызов (ждёт ввода, бесконечный цикл)
@@ -450,6 +457,41 @@ mutate("отказ по умолчанию заменён на 200",
 
 # --- пины: согласованность между файлами (сторож — scripts/check-pins.sh) ----------
 PINS = "scripts/check-pins.sh"
+
+# ⚠ Вендорённые копии BTLS (#125). Свой сторож — scripts/check-btls-vendor.sh.
+VENDOR_CHECK = "scripts/check-btls-vendor.sh"
+
+mutate("отметка гейта вендора не попадает в паспорт — гейт станет непроверяемым",
+       lambda: sub(DF, r"cat /tmp/bi-vendor-btls\.txt;", "true;"),
+       "снятое в сборочной стадии переносится в паспорт")
+
+mutate("пин bee2evp двинут, а вендорённые копии не обновлены",
+       lambda: sub(VPR, r"^commit: 2ae3c71e8b24b6904367850e5963933236a1539f",
+                   "commit: 0000000000000000000000000000000000000000"),
+       "вендор и пин указывают на один коммит", script=VENDOR_CHECK)
+
+mutate("код обязательного набора 0xFF15 подменён в таблице патча",
+       lambda: sub(VP, r"0x0300ff15", "0x0300ff99"),
+       "код 0x0300ff15 объявлен в патче", script=VENDOR_CHECK)
+
+mutate("имя набора в btls.h разошлось с тем, что предлагает конфиг",
+       lambda: sub(VH, r'"DHE-BIGN-WITH-BELT-CTR-MAC-HBELT"',
+                   '"DHE-BIGN-WITH-BELT-CTR-MAC-HBELT-X"'),
+       "наборы конфига и наборы патча — одно и то же множество", script=VENDOR_CHECK)
+
+mutate("патч стал трогать ssl/t1_enc.c — утверждение §6.6 устарело бы молча",
+       lambda: sub(VP, r"--- a/ssl/t1_lib\.c", "--- a/ssl/t1_enc.c"),
+       "патч не трогает ssl/t1_enc.c", script=VENDOR_CHECK)
+
+mutate("патч стал упоминать extended_master_secret",
+       lambda: sub(VP, r"\+#include \"btls\.h\"",
+                   '+#include "btls.h" /* extended_master_secret */'),
+       "патч не трогает механизм extended_master_secret", script=VENDOR_CHECK)
+
+mutate("апстрим починил затирание секрета — §6.5 и #138 устарели бы молча",
+       lambda: sub(VC, r"        OPENSSL_free\(pms\);",
+                   "        OPENSSL_clear_free(pms, pms_len);"),
+       "§6.5 верен: секрет освобождается без затирания", script=VENDOR_CHECK)
 
 # ⚠ Реестр исполняемого (критерий 6.4.8, C6). Мутируем ci.yml и парсер: README и docs
 #   в MUTABLE не входят, поэтому две проверки — «у каждой строки заполнено назначение» и
