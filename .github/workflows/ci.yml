@@ -964,6 +964,127 @@ jobs:
           done
           echo 'ok: успех и обе причины отказа в выводе различимы'
 
+      # Последний исход таблицы `PROCESS.md` §6.8, который не проверялся ничем: внешняя
+      # система молчит → `504`. Отдельным шагом, а не внутри «Смоука», намеренно: тот уже
+      # разросся до полутысячи строк одним `run:`, и красным в нём становится ВЕСЬ шаг
+      # целиком (#146). Здесь имя шага само называет, что упало.
+      #
+      # ⚠ КАКОЙ ИМЕННО ТАЙМАУТ ЗДЕСЬ СРАБАТЫВАЕТ — ПРОЧИТАНО ПО ИСХОДНИКАМ nginx 1.30.4,
+      # тому самому тарболу, что пинится в `Dockerfile` (sha256 сверен). Ответ неочевиден
+      # и определяет, какую переменную опускать:
+      #
+      #   ngx_http_upstream_ssl_init_connection() на ветке NGX_AGAIN ставит
+      #     ngx_add_timer(c->write, u->conf->connect_timeout)
+      #   то есть РУКОПОЖАТИЕ с апстримом бюджетируется `proxy_connect_timeout`,
+      #   а не `proxy_read_timeout`. Срабатывание ведёт в
+      #     ngx_http_upstream_next(..., NGX_HTTP_UPSTREAM_FT_TIMEOUT)
+      #   где status = NGX_HTTP_GATEWAY_TIME_OUT, и при исчерпанных попытках —
+      #     ngx_http_upstream_finalize_request(r, u, status)  → 504.
+      #
+      # Проба покрывает ровно эту половину строки таблицы. Вторая половина — апстрим
+      # ДОГОВОРИЛСЯ по BTLS и молчит уже на HTTP, там сработал бы `proxy_read_timeout` —
+      # названа границей в §6.8, а не выдана за покрытую.
+      - name: Молчащая внешняя система даёт 504, а не 502
+        run: |
+          set -euo pipefail
+          mute_pid=''
+          cleanup() {
+            docker rm -f gw-mute >/dev/null 2>&1 || true
+            if [ -n "$mute_pid" ]; then kill "$mute_pid" 2>/dev/null || true; fi
+            true
+          }
+          trap cleanup EXIT
+
+          # Молчащий собеседник: принимает TCP и НЕ отвечает ничем. Принятые соединения
+          # держим открытыми — закрой их, и шлюз получил бы обрыв, то есть 502, а не 504,
+          # и проба доказывала бы соседний исход таблицы.
+          python3 - <<'PY' &
+          import socket
+          s = socket.socket()
+          s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+          s.bind(("0.0.0.0", 9345))
+          s.listen(16)
+          held = []
+          while True:
+              conn, _ = s.accept()
+              held.append(conn)
+          PY
+          mute_pid=$!
+
+          for _ in $(seq 1 30); do
+            (exec 3<>/dev/tcp/127.0.0.1/9345) 2>/dev/null && break
+            sleep 1
+          done
+
+          # Контейнер достаёт хост по адресу шлюза сети `bridge`. Читаем адрес, а не
+          # пишем 172.17.0.1 литералом: он не гарантирован.
+          host_ip=$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}')
+          [[ "$host_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+            || { echo "FAIL: не прочитал адрес шлюза сети bridge (получено «$host_ip»)" >&2; exit 1; }
+          echo "молчащий собеседник виден контейнерам как $host_ip:9345"
+
+          # ⚠ ПРЕДУСЛОВИЕ, а не проверяемое поведение, и потому проверяется ОТДЕЛЬНО.
+          # Не достанься контейнеру хост — соединение не установилось бы, шлюз ответил бы
+          # 502, и проба покраснела бы с диагнозом «шлюз ведёт себя не так», хотя дело в
+          # среде. Разделяем два отказа заранее.
+          docker run --rm --entrypoint bash bee2-tls-gateway:ci \
+            -c "exec 3<>/dev/tcp/$host_ip/9345" \
+            || { echo "FAIL: из контейнера не достучаться до $host_ip:9345 — проба невозможна в этой среде" >&2; exit 1; }
+
+          # `GW_CONNECT_TIMEOUT=2s` вместо штатных 15s: время проверяется ниже, и короткий
+          # таймаут делает эту проверку осмысленной.
+          docker run -d --name gw-mute -p 127.0.0.1:1096:1080 \
+            -e GW_UPSTREAM_HOST="$host_ip" -e GW_UPSTREAM_PORT=9345 \
+            -e GW_CONNECT_TIMEOUT=2s \
+            bee2-tls-gateway:ci >/dev/null
+          bash scripts/wait-healthy.sh gw-mute
+
+          # Шлюз жив — значит 504 ниже про внешнюю систему, а не про шлюз.
+          code() { curl -s --max-time 40 -o /dev/null -w '%{http_code}' "$@"; }
+          test "$(code http://127.0.0.1:1096/healthz)" = 200 \
+            || { echo "FAIL: шлюз не отвечает на /healthz — 504 ниже ничего не доказал бы" >&2; exit 1; }
+
+          mute_url=http://127.0.0.1:1096/open-banking/v1.0/accounts
+          start=$SECONDS
+          mute_code=$(code "$mute_url" || true)
+          elapsed=$(( SECONDS - start ))
+          echo "молчащий апстрим: код $mute_code за ${elapsed} с"
+          test "$mute_code" = 504 \
+            || { echo "FAIL: молчащая внешняя система дала $mute_code вместо 504" >&2
+                 docker logs gw-mute 2>&1 | tail -20 >&2; exit 1; }
+
+          # ⚠ ВРЕМЯ — ЧАСТЬ УТВЕРЖДЕНИЯ, а не украшение отчёта. Оно доказывает, что
+          # сработал именно опущенный нами `proxy_connect_timeout` (2 с), а не
+          # `proxy_read_timeout` (60 с по умолчанию) и не что-то третье. Без этой строки
+          # проба подтверждала бы код, но не механизм — то есть прочитанное по исходникам
+          # осталось бы непроверенным.
+          test "$elapsed" -lt 10 \
+            || { echo "FAIL: 504 пришёл за ${elapsed} с — сработал не proxy_connect_timeout" >&2; exit 1; }
+
+          # ⚠ КОНТРАСТ НА ТОМ ЖЕ КОНТЕЙНЕРЕ: молчит → 504, порт закрыт → 502. Без него
+          # `504` не отличить от «шлюз отдаёт 504 на любой отказ апстрима», а таблица §6.8
+          # эти два исхода различает.
+          #
+          # ⚠ Пауза не нужна, и это прочитано, а не угадано:
+          # ngx_http_upstream_get_round_robin_peer() на ветке `peers->single` смотрит
+          # только `peer->down` и `peer->max_conns` — `max_fails`/`fail_timeout` для
+          # ОДИНОЧНОГО сервера не применяются. Значит первый отказ не вывел апстрим из
+          # ротации, и 502 ниже — это именно отказ соединения, а не «no live upstreams».
+          kill "$mute_pid"; wait "$mute_pid" 2>/dev/null || true; mute_pid=''
+          refused_code=$(code "$mute_url" || true)
+          echo "тот же шлюз после ухода собеседника: код $refused_code"
+          test "$refused_code" = 502 \
+            || { echo "FAIL: закрытый порт дал $refused_code вместо 502 — контраст не состоялся" >&2; exit 1; }
+
+          # И оператор различает их в журнале: путь в строку не попадает, различие несёт
+          # пара «метка маршрута + статус».
+          mute_log=$(docker logs gw-mute 2>&1)
+          printf '%s\n' "$mute_log" | tail -10
+          grep -q 'route=open-banking-v1-0 .*status=504' <<<"$mute_log" \
+            || { echo "FAIL: таймаут не опознаётся в журнале" >&2; exit 1; }
+          grep -q 'route=open-banking-v1-0 .*status=502' <<<"$mute_log" \
+            || { echo "FAIL: отказ соединения не опознаётся в журнале" >&2; exit 1; }
+          echo 'ok: молчание внешней системы даёт 504, отказ соединения — 502, оба видны в журнале'
       # Ротация корней делается НАБОРОМ: новый корень кладётся рядом со старым заранее,
       # старый убирается после перехода — простоя при этом нет. Так написано в PROCESS.md
       # §4, и до #49 это было УТВЕРЖДЕНИЕМ, а не измерением: что шлюз принимает связку с
