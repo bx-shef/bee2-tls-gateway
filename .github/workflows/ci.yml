@@ -196,7 +196,7 @@ jobs:
       # непривилегированного пользователя, healthcheck на bash /dev/tcp). Без смоука всё это
       # впервые исполнилось бы на сервере во время выката.
       - name: Сборка образа
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
